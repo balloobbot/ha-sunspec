@@ -131,8 +131,9 @@ exercise real addresses and framing rather than a stand-in client.
 
 ## 3. What could modbus-connection do better to support this library?
 
-Ordered by how much pain each caused. Two more were found against 4.1.0 and are
-**already fixed in 4.3.0** — see the end of this section.
+Ordered by how much pain each caused. One more looked like a gap and turned out
+not to be, and two were found against 4.1.0 and are **already fixed in 4.3.0** —
+both at the end of this section.
 
 ### 1. An unimplemented scale factor should not erase the point.
 
@@ -217,30 +218,7 @@ into 4 block reads. It also does not get `SunSpecComponent`'s header
 verification. It already produces the same read items as a `Component`; letting
 it into a group would have made this migration considerably smaller.
 
-### 6. Let `scan()` take more than one base address.
-
-`scan(unit, base_address)` takes exactly one address and raises `SunSpecError` if
-the marker is not there. Requiring the caller to name it is deliberate — a
-library written for one brand knows where that brand puts its map, and probing
-addresses it will never use is wasted round trips. A *generic* consumer is the
-other case: SunSpec defines three locations (40000, 0, 50000) and pysunspec2's
-`base_addr_list` is literally `[40000, 0, 50000]`, so this integration
-reimplements the loop and its error aggregation. Accepting a sequence and
-returning one `SunSpecModels` for whatever was found would cover both without
-changing the default.
-
-Stopping at the first marker is the right semantics: across ~65 surveyed
-libraries, **no manufacturer exposes SunSpec chains at two base addresses at
-once** — pysunspec2 and pysunspec `break` on the first hit, async-sunspec does
-not probe at all, and ABB/FIMER makes the base address a single user-configured
-value (default `0`, validated over the whole 0–65535 range, because "it may
-vary"). That last one is why the candidate list should come from the caller
-rather than the library: it is not always the three spec addresses. The real
-multiplicity is on other axes — unit IDs, and repeated model IDs within one
-chain, which `SunSpecModels` already models. Filed as
-[home-assistant-libs/modbus-connection#147](https://github.com/home-assistant-libs/modbus-connection/issues/147).
-
-### 7. Document the runtime-built component.
+### 6. Document the runtime-built component.
 
 `type("Name", (Component,), namespace)` works perfectly and is the only way to
 be generic over a catalogue of maps. It is also entirely undocumented and
@@ -248,6 +226,29 @@ untested by the library, which makes it feel like something that could break in
 a refactor. Either bless it with a `Component.build(name, fields)` helper and a
 test, or say in the docs that `__init_subclass__` field collection is a
 supported extension point.
+
+### Investigated and dropped: multiple base addresses
+
+`scan(unit, base_address)` takes exactly one address, so this integration
+reimplements pysunspec2's `base_addr_list = [40000, 0, 50000]` loop itself. That
+looked like a gap, and it was filed as
+[home-assistant-libs/modbus-connection#147](https://github.com/home-assistant-libs/modbus-connection/issues/147)
+— then closed as not planned, because the survey behind it went the other way.
+
+Across ~65 surveyed libraries, **no manufacturer exposes SunSpec chains at two
+base addresses at once**: pysunspec and pysunspec2 `break` on the first marker,
+async-sunspec does not probe at all, and ABB/FIMER makes the base address a
+single user-configured value — default `0`, validated over the whole 0–65535
+range, because "it may vary". So there is nothing to merge into one result, and
+the candidate list is not reliably the three spec addresses anyway, which is
+exactly why naming the address is the caller's job. The real multiplicity in
+SunSpec devices is on other axes — unit IDs, and repeated model IDs within one
+chain, both already covered.
+
+What survives is small: a generic consumer still decides for itself which
+exception means "try the next address" (`SunSpecError`, `ModbusExceptionError`)
+versus "this device is unreachable, stop now" (`ModbusConnectionError`). A
+handful of lines, in a rare kind of consumer — not worth API surface.
 
 ### Already fixed in 4.3.0
 
