@@ -194,6 +194,12 @@ handles correctly. So the cost of the limitation is one point in a test model.
 
 ### 3. A `repeating_group`'s count register moves with the instance
 
+Filed, together with gap 4 and the write-side gaps below, as
+[home-assistant-libs/modbus-connection#156](https://github.com/home-assistant-libs/modbus-connection/issues/156)
+— which frames the whole set against the SunSpec Modbus IEEE 1547-2018 profile:
+7 of that profile's 16 models (705–710, 712) cannot be expressed today, and they
+are the entire curve-based control half of it.
+
 There is no opt-out, unlike scale registers. `_count_items` resolves a count at
 `count_field.address + base_offset + instance_offset`. For a group nested inside
 another repeat, instance *i* reads its count from `count_addr + i * stride`.
