@@ -157,7 +157,9 @@ A **second owner** of the same hardware then posted an instrumented report
 against their own unit
 ([issue #5](https://github.com/david2069/franklinwh-modbus/issues/5#issuecomment-4529319648)),
 which independently confirms the M701–M715 model set and establishes two things
-the prose only asserted: the SunSpec chain sits at **base 0** (pysunspec2 places
+the prose only asserted (and that project's issue
+[#11](https://github.com/david2069/franklinwh-modbus/issues/11) adds a third
+point, below): the SunSpec chain sits at **base 0** (pysunspec2 places
 M701 at address 70, M704 at 296, M713 at 1033, and a sweep finds 40000+ and
 50000+ return illegal-address), and a **write can succeed at protocol level
 without applying** — a write to a spec-read-only register answered with a success
@@ -165,6 +167,15 @@ echo carrying the *stored* value rather than an exception. That second point is
 why the write-side asks in
 [#156](https://github.com/home-assistant-libs/modbus-connection/issues/156) grew
 a readback-verification item.
+
+The third point: batching contiguous writes into one transaction is a
+**correctness** requirement on that hardware, not only a round-trip saving — the
+aGate's reserve registers reset to a default when the adjacent mode register is
+written, so three sequential single-register writes are not equivalent to one
+multi-register write. Which also means a write planner must *not* merge as freely
+as `ReadPlan` does: the same device wants its DER control writes ordered with the
+enable register last, so grouping has to express the caller's intent rather than
+be inferred.
 
 ### 1. An unimplemented scale factor should not erase the point.
 
