@@ -16,6 +16,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.helpers.update_coordinator import UpdateFailed
 
 from .api import SunSpecApiClient
+from .api import SunSpecMapShiftError
 from .const import CONF_ENABLED_MODELS
 from .const import CONF_HOST
 from .const import CONF_PORT
@@ -78,7 +79,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     port = entry.data.get(CONF_PORT)
     unit_id = entry.data.get(CONF_UNIT_ID, 1)
 
-    client = SunSpecApiClient(host, port, unit_id, hass)
+    client = SunSpecApiClient(host, port, unit_id)
 
     _LOGGER.debug("Setup conifg entry for SunSpec")
     coordinator = SunSpecDataUpdateCoordinator(hass, client=client, entry=entry)
@@ -104,6 +105,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if unloaded:
         coordinator = hass.data[DOMAIN].pop(entry.entry_id)
         coordinator.unsub()
+        await coordinator.api.async_close()
 
     return True  # unloaded
 
@@ -162,18 +164,18 @@ class SunSpecDataUpdateCoordinator(DataUpdateCoordinator):
     async def _async_update_data(self):
         """Update data via library."""
         _LOGGER.debug("SunSpec Update data coordinator update")
-        data = {}
         try:
-            model_ids = self.option_model_filter & set(
-                await self.api.async_get_models()
-            )
-            _LOGGER.debug("SunSpec Update data got models %s", model_ids)
-
-            for model_id in model_ids:
-                data[model_id] = await self.api.async_get_data(model_id)
-            self.api.close()
-            return data
+            return await self.api.async_read(self.option_model_filter)
+        except SunSpecMapShiftError as exception:
+            # The components sit at the addresses the setup scan found. The device
+            # rearranged its model chain, so setup has to run again.
+            _LOGGER.warning("SunSpec register map changed, reloading: %s", exception)
+            self.hass.config_entries.async_schedule_reload(self.entry.entry_id)
+            raise UpdateFailed() from exception
         except Exception as exception:
             _LOGGER.warning(exception)
-            self.api.reconnect_next()
             raise UpdateFailed() from exception
+        finally:
+            # This integration polls infrequently and some inverters accept only
+            # one Modbus connection, so the link is not held between updates.
+            await self.api.async_disconnect()

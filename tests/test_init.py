@@ -9,7 +9,6 @@ from custom_components.sunspec import SunSpecDataUpdateCoordinator
 from custom_components.sunspec import async_setup_entry
 from custom_components.sunspec.const import DOMAIN
 
-from . import setup_mock_sunspec_config_entry
 from .const import MOCK_CONFIG
 
 
@@ -87,10 +86,6 @@ async def test_fetch_data_connect_error(hass, connect_error_on_get_data):
     set_entry_setup_in_progress(hass, config_entry)
     with pytest.raises(ConfigEntryNotReady):
         assert await async_setup_entry(hass, config_entry)
-
-
-async def test_client_reconnect(hass, sunspec_client_mock_not_connected) -> None:
-    await setup_mock_sunspec_config_entry(hass, MOCK_CONFIG)
 
 
 async def test_migrate_entry_from_v1_to_v2_with_slave_id(hass):
@@ -213,3 +208,26 @@ async def test_migrate_entry_version_2_no_migration_needed(hass):
     assert config_entry.version == 2
     assert "unit_id" in config_entry.data
     assert config_entry.data["unit_id"] == 5
+
+
+async def test_map_shift_reloads_the_entry(hass, sunspec_client_mock):
+    """A device that rearranges its model chain gets a fresh scan."""
+    from unittest.mock import patch
+
+    from modbus_connection.model.sunspec import SunSpecMapShiftError
+
+    config_entry = MockConfigEntry(domain=DOMAIN, data=MOCK_CONFIG, entry_id="test")
+    config_entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(config_entry.entry_id)
+    await hass.async_block_till_done()
+
+    coordinator = hass.data[DOMAIN][config_entry.entry_id]
+    with patch.object(
+        coordinator.api,
+        "async_read",
+        side_effect=SunSpecMapShiftError("model moved"),
+    ), patch.object(hass.config_entries, "async_schedule_reload") as reload:
+        await coordinator.async_refresh()
+
+    assert reload.called
+    assert not coordinator.last_update_success

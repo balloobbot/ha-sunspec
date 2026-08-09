@@ -36,11 +36,10 @@ def bypass_setup_fixture():
         yield
 
 
-# Here we simiulate a successful config flow from the backend.
-# Note that we use the `bypass_get_data` fixture here because
-# we want the config flow validation to succeed during the test.
+# Here we simiulate a successful config flow from the backend, against the
+# register map the `sunspec_client_mock` fixture serves.
 async def test_successful_config_flow(
-    hass, bypass_get_data, enable_custom_integrations, sunspec_client_mock
+    hass, enable_custom_integrations, sunspec_client_mock
 ):
     """Test a successful config flow."""
     # Initialize a config flow

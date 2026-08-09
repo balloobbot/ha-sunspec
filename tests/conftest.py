@@ -1,43 +1,72 @@
 """Global fixtures for SunSpec integration."""
 
+from contextlib import contextmanager
 import logging
 from typing import Any
 from unittest.mock import Mock
 from unittest.mock import PropertyMock
 from unittest.mock import patch
 
+from modbus_connection import ModbusConnectionError
+from modbus_connection import ModbusTimeoutError
+from modbus_connection.mock import MockModbusConnection
 import pytest
-import sunspec2.file.client as modbus_client
-
-from custom_components.sunspec.api import ConnectionError
-from custom_components.sunspec.api import ConnectionTimeoutError
-from custom_components.sunspec.api import SunSpecApiClient
+import sunspec2.file.client as file_client
 
 pytest_plugins = "pytest_homeassistant_custom_component"
 _LOGGER: logging.Logger = logging.getLogger(__package__)
 
-
-class MockFileClientDeviceNotConnected(modbus_client.FileClientDevice):
-    def is_connected(self):
-        return False
-
-    def connect(self):
-        return True
+TEST_DEVICE = "./tests/test_data/inverter.json"
+BASE_ADDRESS = 40000
+BASE_ADDRESSES = (40000, 0, 50000)
+SUNS_MARKER = [0x5375, 0x6E53]
+END_MODEL = [0xFFFF, 0]
 
 
-class MockFileClientDevice(modbus_client.FileClientDevice):
-    def is_connected(self):
-        return True
+def sunspec_holding_registers(path: str, base_address: int = BASE_ADDRESS) -> dict:
+    """Render a pysunspec2 device dump as the register map a device would serve.
 
-    def scan(self, progress=None):
-        print(progress)
-        if progress is not None:
-            if not progress("Mock scan"):
-                return
-        return super().scan()
+    The integration talks Modbus now, so the fixtures hand it registers rather
+    than a stand-in client: the marker, every model's own image back to back, and
+    the end marker that terminates the chain.
+    """
+    device = file_client.FileClientDevice(path)
+    device.scan()
+    words = list(SUNS_MARKER)
+    for model in device.model_list:
+        image = model.get_mb()
+        words.extend(
+            int.from_bytes(image[i : i + 2], "big") for i in range(0, len(image), 2)
+        )
+    words.extend(END_MODEL)
+    return {base_address + offset: word for offset, word in enumerate(words)}
 
-    def connect(self):
-        return True
+
+@contextmanager
+def patch_sunspec_device(registers=None, error=None, unit_id=1):
+    """Serve ``registers`` to every client the integration builds.
+
+    ``error`` makes the device refuse the reads discovery starts from, as a
+    device that is powered down or behind a dead gateway would. The mock takes
+    failures per address, so the base addresses stand in for the whole device.
+    """
+    if registers is None:
+        registers = sunspec_holding_registers(TEST_DEVICE)
+    connections = []
+
+    class MockSunSpecConnection(MockModbusConnection):
+        """A ``ModbusConnection`` serving the fixture's registers in memory."""
+
+        def __init__(self, params, **kwargs):
+            super().__init__()
+            unit = self.for_unit(unit_id)
+            unit.holding.update(registers)
+            for base in BASE_ADDRESSES if error is not None else ():
+                unit.fail_read(base, error)
+            connections.append(self)
+
+    with patch("custom_components.sunspec.api.ModbusConnection", MockSunSpecConnection):
+        yield connections
 
 
 # This fixture is used to prevent HomeAssistant from attempting to create and dismiss persistent
@@ -59,14 +88,6 @@ def auto_enable_custom_integrations(
     """Enable custom integrations defined in the test dir."""
 
 
-@pytest.fixture(autouse=True)
-def clear_sunspec_client_cache():
-    """Avoid cross-test reuse of cached clients with different fixture behavior."""
-    SunSpecApiClient.CLIENT_CACHE = {}
-    yield
-    SunSpecApiClient.CLIENT_CACHE = {}
-
-
 # This fixture, when used, will result in calls to async_get_data to return None. To have the call
 # return a value, we would add the `return_value=<VALUE_TO_RETURN>` parameter to the patch call.
 @pytest.fixture(name="bypass_get_device_info")
@@ -76,26 +97,11 @@ def bypass_get_device_info_fixture():
         yield
 
 
-# This fixture, when used, will result in calls to async_get_data to return None. To have the call
-# return a value, we would add the `return_value=<VALUE_TO_RETURN>` parameter to the patch call.
-@pytest.fixture(name="bypass_get_data")
-def bypass_get_data_fixture():
-    """Skip calls to get data from API."""
-    with patch("custom_components.sunspec.SunSpecApiClient.async_get_data"):
-        yield
-
-
 @pytest.fixture
 def sunspec_client_mock():
-    """Skip calls to get data from API."""
-    client = MockFileClientDevice("./tests/test_data/inverter.json")
-    client.scan()
-    with patch(
-        "custom_components.sunspec.SunSpecApiClient.modbus_connect", return_value=client
-    ), patch(
-        "custom_components.sunspec.SunSpecApiClient.check_port", return_value=True
-    ):
-        yield
+    """Serve the test device's registers to the integration."""
+    with patch_sunspec_device() as connections:
+        yield connections
 
 
 # In this fixture, we are forcing calls to async_get_data to raise an Exception. This is useful
@@ -103,53 +109,16 @@ def sunspec_client_mock():
 @pytest.fixture
 def sunspec_client_mock_connect_error():
     """Simulate connection error when retrieving data from API."""
-    client = MockFileClientDevice("./tests/test_data/inverter.json")
-    with patch(
-        "custom_components.sunspec.SunSpecApiClient.modbus_connect", return_value=client
-    ), patch(
-        "custom_components.sunspec.SunSpecApiClient.check_port", return_value=True
-    ), patch(
-        "custom_components.sunspec.SunSpecApiClient.async_get_models",
-        side_effect=ConnectionError,
-    ):
+    with patch_sunspec_device(error=ModbusConnectionError("no route to host")):
         yield
 
 
-@pytest.fixture
-def sunspec_client_mock_not_connected():
-    """Skip calls to get data from API."""
-    client = MockFileClientDeviceNotConnected("./tests/test_data/inverter.json")
-    client.scan()
-    with patch(
-        "custom_components.sunspec.SunSpecApiClient.modbus_connect", return_value=client
-    ), patch(
-        "custom_components.sunspec.SunSpecApiClient.check_port", return_value=True
-    ):
-        yield
-
-
-@pytest.fixture(name="sunspec_modbus_client_mock")
-def sunspec_modbus_client_mock():
-    """Skip calls to get data from API."""
-    mock = Mock()
-    with patch(
-        "sunspec2.modbus.client.SunSpecModbusClientDeviceTCP", return_value=mock
-    ), patch(
-        "custom_components.sunspec.SunSpecApiClient.check_port", return_value=True
-    ):
-        yield
-
-
-# In this fixture, we are forcing calls to async_get_data to raise an Exception. This is useful
-# for exception handling.
 @pytest.fixture(name="error_on_get_device_info")
 def error_get_device_info_fixture():
     """Simulate error when retrieving data from API."""
     with patch(
         "custom_components.sunspec.SunSpecApiClient.async_get_device_info",
         side_effect=Exception,
-    ), patch(
-        "custom_components.sunspec.SunSpecApiClient.check_port", return_value=True
     ):
         yield
 
@@ -159,9 +128,7 @@ def timeout_get_device_info_fixture():
     """Simulate timeout when retrieving data from API."""
     with patch(
         "custom_components.sunspec.SunSpecApiClient.async_get_device_info",
-        side_effect=ConnectionTimeoutError,
-    ), patch(
-        "custom_components.sunspec.SunSpecApiClient.check_port", return_value=True
+        side_effect=ModbusTimeoutError,
     ):
         yield
 
@@ -181,56 +148,34 @@ def device_info_without_serial_fixture():
     yield device_info
 
 
-# In this fixture, we are forcing calls to async_get_data to raise an Exception. This is useful
+# In this fixture, we are forcing calls to async_read to raise an Exception. This is useful
 # for exception handling.
 @pytest.fixture
 def error_on_get_data():
     """Simulate error when retrieving data from API."""
-    client = MockFileClientDevice("./tests/test_data/inverter.json")
-    client.scan()
-    with patch(
-        "custom_components.sunspec.SunSpecApiClient.modbus_connect", return_value=client
-    ), patch(
-        "custom_components.sunspec.SunSpecApiClient.check_port", return_value=True
-    ), patch(
-        "custom_components.sunspec.SunSpecApiClient.async_get_data",
-        side_effect=ConnectionError,
+    with patch_sunspec_device(), patch(
+        "custom_components.sunspec.SunSpecApiClient.async_read",
+        side_effect=Exception,
     ):
         yield
 
 
-# In this fixture, we are forcing calls to async_get_data to raise an Exception. This is useful
-# for exception handling.
 @pytest.fixture
 def timeout_error_on_get_data():
     """Simulate timeout error when retrieving data from API."""
-    client = MockFileClientDevice("./tests/test_data/inverter.json")
-    client.scan()
-    with patch(
-        "custom_components.sunspec.SunSpecApiClient.get_client", return_value=client
-    ), patch(
-        "custom_components.sunspec.SunSpecApiClient.check_port", return_value=True
-    ), patch(
-        "custom_components.sunspec.SunSpecApiClient.async_get_data",
-        side_effect=ConnectionTimeoutError,
+    with patch_sunspec_device(), patch(
+        "custom_components.sunspec.SunSpecApiClient.async_read",
+        side_effect=ModbusTimeoutError,
     ):
         yield
 
 
-# In this fixture, we are forcing calls to async_get_data to raise an Exception. This is useful
-# for exception handling.
 @pytest.fixture
 def connect_error_on_get_data():
     """Simulate connection error when retrieving data from API."""
-    client = MockFileClientDevice("./tests/test_data/inverter.json")
-    client.scan()
-    with patch(
-        "custom_components.sunspec.SunSpecApiClient.modbus_connect", return_value=client
-    ), patch(
-        "custom_components.sunspec.SunSpecApiClient.check_port", return_value=True
-    ), patch(
-        "custom_components.sunspec.SunSpecApiClient.async_get_data",
-        side_effect=ConnectionError,
+    with patch_sunspec_device(), patch(
+        "custom_components.sunspec.SunSpecApiClient.async_read",
+        side_effect=ModbusConnectionError,
     ):
         yield
 

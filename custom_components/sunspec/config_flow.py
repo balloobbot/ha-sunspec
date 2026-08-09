@@ -5,11 +5,11 @@ import logging
 from homeassistant import config_entries
 from homeassistant.core import callback
 import homeassistant.helpers.config_validation as cv
+from modbus_connection import ModbusError
+from modbus_connection import ModbusTimeoutError
 import voluptuous as vol
 
 from . import SCAN_INTERVAL
-from .api import ConnectionError
-from .api import ConnectionTimeoutError
 from .api import SunSpecApiClient
 from .const import CONF_ENABLED_MODELS
 from .const import CONF_HOST
@@ -25,7 +25,7 @@ _LOGGER: logging.Logger = logging.getLogger(__package__)
 
 def set_connection_error(errors, host, port, unit_id, err):
     """Map backend failures to user-visible config flow errors."""
-    if isinstance(err, ConnectionTimeoutError):
+    if isinstance(err, ModbusTimeoutError):
         errors["base"] = "timeout"
         _LOGGER.warning(
             "Timeout while connecting to host %s:%s unit %s",
@@ -35,7 +35,7 @@ def set_connection_error(errors, host, port, unit_id, err):
         )
         return
 
-    if isinstance(err, ConnectionError):
+    if isinstance(err, ModbusError):
         errors["base"] = "connection"
         _LOGGER.warning(
             "Connection failed for host %s:%s unit %s: %s",
@@ -65,6 +65,7 @@ class SunSpecFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
     def __init__(self):
         """Initialize."""
         self._errors = {}
+        self._models = set()
 
     def _get_unique_id(self, host, port, unit_id):
         """Build a stable unique ID even when device serial data is missing."""
@@ -144,7 +145,7 @@ class SunSpecFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
 
     async def _show_settings_form(self, user_input):
         """Show the configuration form to edit settings data."""
-        models = set(await self.client.async_get_models())
+        models = self._models
         model_filter = {model for model in sorted(models)}
         default_enabled = {model for model in DEFAULT_MODELS if model in models}
         return self.async_show_form(
@@ -167,13 +168,17 @@ class SunSpecFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
     async def _test_connection(self, host, port, unit_id):
         """Return true if credentials is valid."""
         _LOGGER.debug(f"Test connection to {host}:{port} unit id {unit_id}")
+        client = SunSpecApiClient(host, port, unit_id)
         try:
-            self.client = SunSpecApiClient(host, port, unit_id, self.hass)
-            self._device_info = await self.client.async_get_device_info()
+            self._device_info = await client.async_get_device_info()
+            self._models = set(await client.async_get_models())
             _LOGGER.info(self._device_info)
             return True
         except Exception as err:
             set_connection_error(self._errors, host, port, unit_id, err)
+        finally:
+            # The entry gets its own client; nothing outlives this probe.
+            await client.async_close()
         return False
 
 
