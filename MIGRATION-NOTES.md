@@ -227,7 +227,17 @@ other case: SunSpec defines three locations (40000, 0, 50000) and pysunspec2's
 `base_addr_list` is literally `[40000, 0, 50000]`, so this integration
 reimplements the loop and its error aggregation. Accepting a sequence and
 returning one `SunSpecModels` for whatever was found would cover both without
-changing the default. Filed as
+changing the default.
+
+Stopping at the first marker is the right semantics: across ~65 surveyed
+libraries, **no manufacturer exposes SunSpec chains at two base addresses at
+once** — pysunspec2 and pysunspec `break` on the first hit, async-sunspec does
+not probe at all, and ABB/FIMER makes the base address a single user-configured
+value (default `0`, validated over the whole 0–65535 range, because "it may
+vary"). That last one is why the candidate list should come from the caller
+rather than the library: it is not always the three spec addresses. The real
+multiplicity is on other axes — unit IDs, and repeated model IDs within one
+chain, which `SunSpecModels` already models. Filed as
 [home-assistant-libs/modbus-connection#147](https://github.com/home-assistant-libs/modbus-connection/issues/147).
 
 ### 7. Document the runtime-built component.
