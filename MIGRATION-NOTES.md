@@ -138,10 +138,22 @@ gap and turned out not to be, and two were found against 4.1.0 and are **already
 fixed in 4.3.0** — both at the end of this section.
 
 The evidence for "real hardware" throughout is a **FranklinWH aGate** dump
-(firmware `V10R01B04D00`, models 1, 502, 701–715) found in the surveyed corpus,
-plus `solaredge-modbus-multi`'s handling of the same cases. Where the only
-evidence is this repo's `tests/test_data/inverter.json`, that is a *synthetic*
-pysunspec2 fixture and is called out as such.
+(firmware `V10R01B04D00`, models 1, 502, 701–715) plus `solaredge-modbus-multi`'s
+handling of the same cases. Where the only evidence is this repo's
+`tests/test_data/inverter.json`, that is a *synthetic* pysunspec2 fixture and is
+called out as such.
+
+On the aGate dump's provenance, since a lot rests on it: it is committed in
+[david2069/franklinwh-modbus](https://github.com/david2069/franklinwh-modbus),
+one of the surveyed projects — **that author's own device, not hardware anyone
+here has, and independently unverified**. The register dumps are machine output
+(the generating tool is committed beside them, and a second generated report
+agrees on IP, model, firmware and serial), so the model set, the counts and the
+scale-factor values are solid. The repo's *hand-written* analysis is a different
+matter: it is a heavily AI-assisted project and every `tests/results/*.md` its
+prose cites as evidence is missing from the repo, so claims sourced only from
+that prose — the device's base address, and what it does with writes it should
+reject — are not relied on here.
 
 ### 1. An unimplemented scale factor should not erase the point.
 
