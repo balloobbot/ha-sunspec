@@ -18,7 +18,6 @@ _LOGGER: logging.Logger = logging.getLogger(__package__)
 
 TEST_DEVICE = "./tests/test_data/inverter.json"
 BASE_ADDRESS = 40000
-BASE_ADDRESSES = (40000, 0, 50000)
 SUNS_MARKER = [0x5375, 0x6E53]
 END_MODEL = [0xFFFF, 0]
 
@@ -46,9 +45,8 @@ def sunspec_holding_registers(path: str, base_address: int = BASE_ADDRESS) -> di
 def patch_sunspec_device(registers=None, error=None, unit_id=1):
     """Serve ``registers`` to every client the integration builds.
 
-    ``error`` makes the device refuse the reads discovery starts from, as a
-    device that is powered down or behind a dead gateway would. The mock takes
-    failures per address, so the base addresses stand in for the whole device.
+    ``error`` makes the device answer nothing, as one that is powered down or
+    behind a dead gateway would.
     """
     if registers is None:
         registers = sunspec_holding_registers(TEST_DEVICE)
@@ -61,8 +59,8 @@ def patch_sunspec_device(registers=None, error=None, unit_id=1):
             super().__init__()
             unit = self.for_unit(unit_id)
             unit.holding.update(registers)
-            for base in BASE_ADDRESSES if error is not None else ():
-                unit.fail_read(base, error)
+            if error is not None:
+                unit.fail_requests(error)
             connections.append(self)
 
     with patch("custom_components.sunspec.api.ModbusConnection", MockSunSpecConnection):

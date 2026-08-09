@@ -4,7 +4,6 @@ from dataclasses import dataclass
 import logging
 from typing import Any
 
-from modbus_connection import ClientClosedError
 from modbus_connection import ModbusError
 from modbus_connection import ModbusExceptionError
 from modbus_connection import ModbusTcpParams
@@ -147,44 +146,6 @@ def _read_point(point: PointLayout, component) -> SunSpecPoint:
     return SunSpecPoint(point.pdef, getattr(component, point.raw_attr, None), scaled)
 
 
-class ReconnectingUnit:
-    """A unit handle that outlives the connection under it.
-
-    Some inverters accept a single Modbus TCP connection, so this integration
-    drops the link between polls rather than holding it. modbus-connection can
-    only ``close()`` a connection - permanently - so the link is recycled by
-    building a new connection, and the components keep this handle so they
-    survive it with their read plans intact. Everything else is delegated to the
-    real unit, which is what the ``ModbusUnit`` protocol asks of a handle.
-    """
-
-    def __init__(self, connect, unit_id: int) -> None:
-        self._connect = connect
-        self._unit_id = unit_id
-        self._connection = None
-        self._unit = None
-        self._closed = False
-
-    @property
-    def connected(self) -> bool:
-        return self._connection is not None and self._connection.connected
-
-    def __getattr__(self, name: str):
-        if self._closed:
-            raise ClientClosedError("connection is closed")
-        if self._connection is None:
-            self._connection = self._connect()
-            self._unit = self._connection.for_unit(self._unit_id)
-        return getattr(self._unit, name)
-
-    async def disconnect(self, *, permanent: bool = False) -> None:
-        """Drop the link; the next request builds a new connection."""
-        self._closed = self._closed or permanent
-        connection, self._connection, self._unit = self._connection, None, None
-        if connection is not None:
-            await connection.close()
-
-
 class SunSpecApiClient:
     """Read the models a SunSpec device advertises."""
 
@@ -194,7 +155,12 @@ class SunSpecApiClient:
         self._host = host
         self._port = port
         self._unit_id = unit_id
-        self._unit = ReconnectingUnit(self._new_connection, unit_id)
+        self._connection = ModbusConnection(
+            ModbusTcpParams(host=host, port=port),
+            timeout=TIMEOUT,
+            message_spacing=MESSAGE_SPACING,
+        )
+        self._unit = self._connection.for_unit(unit_id)
         self._models: SunSpecModels | None = None
         self._wrappers: dict[int, SunSpecModelWrapper] = {}
         self._components: dict[int, list[SunSpecComponent]] = {}
@@ -240,28 +206,20 @@ class SunSpecApiClient:
         await group.async_update()
         return {model_id: self._wrappers[model_id] for model_id in present}
 
-    async def async_disconnect(self, *, permanent: bool = False) -> None:
-        """Drop the link; the next read opens a new one.
+    async def async_disconnect(self) -> None:
+        """Drop the link; the next read establishes a new one.
 
         Best effort: the link is dropped either way, so a failure tearing the old
         one down is nothing a caller can act on.
         """
         try:
-            await self._unit.disconnect(permanent=permanent)
+            await self._connection.disconnect()
         except ModbusError as err:
             _LOGGER.debug("Error disconnecting from %s: %s", self._host, err)
 
     async def async_close(self) -> None:
         """Close the connection permanently."""
-        await self.async_disconnect(permanent=True)
-
-    def _new_connection(self):
-        """Build a connection to the device; no I/O happens here."""
-        return ModbusConnection(
-            ModbusTcpParams(host=self._host, port=self._port),
-            timeout=TIMEOUT,
-            message_spacing=MESSAGE_SPACING,
-        )
+        await self._connection.close()
 
     # -- discovery -------------------------------------------------------------
 

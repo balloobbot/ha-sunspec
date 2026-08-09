@@ -160,13 +160,13 @@ async def test_disconnect_between_polls(hass, sunspec_client_mock):
     """The link is dropped between polls and re-established on the next read."""
     api = SunSpecApiClient(host="test", port=123, unit_id=1)
     await api.async_read({1})
-    assert api._unit.connected
+    assert api._connection.connected
 
     await api.async_disconnect()
-    assert not api._unit.connected
+    assert not api._connection.connected
 
     await api.async_read({1})
-    assert api._unit.connected
+    assert api._connection.connected
     await api.async_close()
 
 
@@ -175,7 +175,7 @@ async def test_get_models_for_other_device(hass, sunspec_client_mock):
     api = SunSpecApiClient(host="test", port=123, unit_id=1)
     models = await api.async_get_models({"host": "other", "port": 502, "unit_id": 1})
     assert models == ALL_MODELS
-    assert not api._unit.connected
+    assert not api._connection.connected
     await api.async_close()
 
 
@@ -184,11 +184,11 @@ async def test_reconnects_after_link_lost(hass, sunspec_client_mock):
     api = SunSpecApiClient(host="test", port=123, unit_id=1)
     assert await api.async_read({1})
 
-    api._unit._connection.simulate_connection_lost()
-    assert not api._unit.connected
+    api._connection.simulate_connection_lost()
+    assert not api._connection.connected
 
     assert await api.async_read({1})
-    assert api._unit.connected
+    assert api._connection.connected
     await api.async_close()
 
 

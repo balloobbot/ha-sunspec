@@ -2,7 +2,7 @@
 
 This integration used to talk to devices through **pysunspec2**'s synchronous
 Modbus client, driven from Home Assistant's executor. It now talks
-**modbus-connection 4.1.0** (tmodbus backend) and keeps pysunspec2 only for the
+**modbus-connection 4.3.0** (tmodbus backend) and keeps pysunspec2 only for the
 SunSpec model definitions it ships — the JSON catalogue, never the transport.
 
 What changed, in one paragraph: `custom_components/sunspec/model.py` compiles a
@@ -17,7 +17,7 @@ Two results worth stating up front, because they set the tone for everything
 below:
 
 - **All 106 model definitions pysunspec2 ships compile into components**, with
-  exactly one point dropped in the entire catalogue (see gap 3).
+  exactly one point dropped in the entire catalogue (see gap 2).
 - Against the test device (models 1, 103, 160, 304, 701×2, 702–712), the new
   code produces **byte-identical keys and values** to the pysunspec2
   implementation — every model, every point, every repeated instance. A poll of
@@ -56,7 +56,7 @@ its modules, and 44 of the shipped definitions use it.
 **The count point is always a point of the *model*, never of the group that
 uses it** — even for a group nested two levels down. pysunspec2 resolves it with
 a literal `getattr(self.model, count_name)`. This is what makes models 705–712
-hard (gap 4).
+hard (gap 3).
 
 **A point's validity depends on its value, not its definition.** `isValidPoint`
 calls a point real only if the device implemented it *and* it carries a unit (or
@@ -114,18 +114,12 @@ What it *does* do is use public API in ways the docs don't cover:
 - **Two fields at the same address.** Every point with a scale factor is
   declared twice: once with `scale_register=`, once without (`raw_attr`). The
   planner merges them into one block read, so it costs no extra request — but it
-  is not documented that two `ReadItem`s at one address are free. See gap 2 for
+  is not documented that two `ReadItem`s at one address are free. See gap 1 for
   why this is necessary.
-
-- **A hand-written `ModbusUnit`.** `ReconnectingUnit` (`api.py`) implements the
-  `ModbusUnit` protocol by delegation so the components survive the connection
-  being rebuilt between polls. The library explicitly endorses third parties
-  implementing the protocol, so this is a supported seam — it just should not
-  have been needed (gap 1).
 
 - **A raw read outside the model layer.** `_async_read_counts()` calls
   `unit.read_holding_registers()` directly to resolve a nested group's count
-  before the layout can be built (gaps 4 and 5).
+  before the layout can be built (gaps 3 and 4).
 
 In the tests: `MockModbusConnection` is subclassed to accept the params/kwargs
 the real constructor takes and to preload registers, and `unit.fail_read()` /
@@ -137,23 +131,10 @@ exercise real addresses and framing rather than a stand-in client.
 
 ## 3. What could modbus-connection do better to support this library?
 
-Ordered by how much pain each caused.
+Ordered by how much pain each caused. Two more were found against 4.1.0 and are
+**already fixed in 4.3.0** — see the end of this section.
 
-### 1. Ship `disconnect()`. `close()` being permanent is a real constraint.
-
-Some inverters accept exactly one Modbus TCP connection, so this integration
-drops the link between polls. 4.1.0 offers only `close()`, which is permanent —
-`connect()` afterwards raises `ClientClosedError`. Rebuilding the
-`ModbusConnection` invalidates every `ModbusUnit` handle, and units are held by
-components, which cache their read plans; rebuilding those every poll would mean
-re-running discovery every poll.
-
-The workaround is `ReconnectingUnit`: a delegating unit handle that outlives the
-connection under it. `disconnect()` exists on main and would delete this class
-outright — **release it**. Failing that, document the proxy pattern, because
-every "one connection at a time" device needs it.
-
-### 2. An unimplemented scale factor should not erase the point.
+### 1. An unimplemented scale factor should not erase the point.
 
 `sunssf`'s unimplemented sentinel is `0x8000`, which decodes to `-32768`, which
 falls outside the `(-10, 10)` spec range that `_scaled()` guards, so the point
@@ -180,7 +161,7 @@ for one — hence declaring every scaled point twice. Concretely, either:
 The first is what every other SunSpec reader does. The second is more generally
 useful — diagnostics want it too.
 
-### 3. `scale_in_block` should be per field, not per component.
+### 2. `scale_in_block` should be per field, not per component.
 
 It is a class attribute, so a repeating block either carries *all* its scale
 factors or *none*. Model 63001's repeating block references two factors inside
@@ -190,7 +171,7 @@ but the fix is small (`uint16(0, scale_register=1, scale_in_block=True)`) and it
 removes a whole class of "cannot express" from a consumer that must handle
 arbitrary maps.
 
-### 4. A `repeating_group`'s count register moves with the instance
+### 3. A `repeating_group`'s count register moves with the instance
 
 There is no opt-out, unlike scale registers. `_count_items` resolves a count at
 `count_field.address + base_offset + instance_offset`. For a group nested inside
@@ -206,7 +187,7 @@ count curve points by `NPt`, and 707–710 do it three levels deep, with `NPt`
 always in the model's fixed block. **Give counts the same treatment**, ideally
 defaulting to "stay put" for symmetry with `scale_register`.
 
-### 5. `stride` has to be a static `int`
+### 4. `stride` has to be a static `int`
 
 So a block containing a runtime-counted group cannot be placed. Model 705's
 curve block is `11 + NPt * 2` registers. `NPt` is only known after a
@@ -225,18 +206,7 @@ The same root cause makes a group that *follows* a runtime-counted group
 impossible to place (`build_layout` rejects it explicitly). No shipped
 definition does that today, but it is a structural limit worth naming.
 
-### 6. The mock and the real connection have drifted apart.
-
-`MockModbusConnection` is not a `BaseModbusConnection` subclass — it is a
-separate implementation registered with `BaseModbusConnection.register()`. In
-4.1.0 that means it has no `_client`, its `connected` is
-`_link_up and not _closed` rather than "a client exists", and it lacks
-`fail_requests()` (main has it). So a fixture that wants "this device answers
-nothing" has to fake it per address, and anything the real connection does that
-the mock does not is invisible until it hits hardware. Either derive the mock
-from the base or test the two against a shared conformance suite.
-
-### 7. Let a `ManualComponent` join a `ComponentGroup`.
+### 5. Let a `ManualComponent` join a `ComponentGroup`.
 
 `ManualComponent` is the documented answer to "the layout comes from config
 rather than a typed class", and it was the obvious first choice here — keys are
@@ -247,16 +217,20 @@ into 4 block reads. It also does not get `SunSpecComponent`'s header
 verification. It already produces the same read items as a `Component`; letting
 it into a group would have made this migration considerably smaller.
 
-### 8. `scan()` should try the SunSpec base addresses itself.
+### 6. Let `scan()` take more than one base address.
 
 `scan(unit, base_address)` takes exactly one address and raises `SunSpecError` if
-the marker is not there. SunSpec defines three (40000, 0, 50000) and every
-device library loops them — pysunspec2's `base_addr_list` is literally
-`[40000, 0, 50000]`. Make `scan(unit)` do that by default and report which base
-address it found, instead of every consumer reimplementing the loop and its
-error aggregation.
+the marker is not there. Requiring the caller to name it is deliberate — a
+library written for one brand knows where that brand puts its map, and probing
+addresses it will never use is wasted round trips. A *generic* consumer is the
+other case: SunSpec defines three locations (40000, 0, 50000) and pysunspec2's
+`base_addr_list` is literally `[40000, 0, 50000]`, so this integration
+reimplements the loop and its error aggregation. Accepting a sequence and
+returning one `SunSpecModels` for whatever was found would cover both without
+changing the default. Filed as
+[home-assistant-libs/modbus-connection#147](https://github.com/home-assistant-libs/modbus-connection/issues/147).
 
-### 9. Document the runtime-built component.
+### 7. Document the runtime-built component.
 
 `type("Name", (Component,), namespace)` works perfectly and is the only way to
 be generic over a catalogue of maps. It is also entirely undocumented and
@@ -264,6 +238,26 @@ untested by the library, which makes it feel like something that could break in
 a refactor. Either bless it with a `Component.build(name, fields)` helper and a
 test, or say in the docs that `__init_subclass__` field collection is a
 supported extension point.
+
+### Already fixed in 4.3.0
+
+Both of these bit while the migration was written against 4.1.0, and both are
+gone in 4.3.0 — recorded because they show up in the shape of the code's history,
+not because they still need doing.
+
+- **`disconnect()`.** 4.1.0 had only `close()`, which is permanent, so dropping
+  the link between polls meant rebuilding the connection — which invalidates
+  every `ModbusUnit` handle, and units are held by components that cache their
+  read plans. The workaround was a delegating `ReconnectingUnit` proxy that
+  outlived the connection under it. 4.3.0's `disconnect()` deleted that class
+  outright; `async_disconnect()` is now one line.
+- **The mock had drifted from the real connection.** In 4.1.0
+  `MockModbusConnection` was a separate implementation registered with
+  `BaseModbusConnection.register()` rather than a subclass, so it had no
+  `_client`, different `connected` semantics, and no `fail_requests()` — a
+  fixture wanting "this device answers nothing" had to fake it address by
+  address. In 4.3.0 it subclasses the base and has `fail_requests()`, and the
+  fixture is three lines shorter.
 
 ### Things that went better than expected
 
