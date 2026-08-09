@@ -146,14 +146,25 @@ called out as such.
 On the aGate dump's provenance, since a lot rests on it: it is committed in
 [david2069/franklinwh-modbus](https://github.com/david2069/franklinwh-modbus),
 one of the surveyed projects — **that author's own device, not hardware anyone
-here has, and independently unverified**. The register dumps are machine output
-(the generating tool is committed beside them, and a second generated report
-agrees on IP, model, firmware and serial), so the model set, the counts and the
-scale-factor values are solid. The repo's *hand-written* analysis is a different
-matter: it is a heavily AI-assisted project and every `tests/results/*.md` its
-prose cites as evidence is missing from the repo, so claims sourced only from
-that prose — the device's base address, and what it does with writes it should
-reject — are not relied on here.
+here has**. The register dumps are machine output (the generating tool is
+committed beside them, and a second generated report agrees on IP, model,
+firmware and serial), so the model set, the counts and the scale-factor values
+are solid. The repo's *hand-written* analysis is weaker: it is a heavily
+AI-assisted project and every `tests/results/*.md` its prose cites as evidence is
+missing from the repo.
+
+A **second owner** of the same hardware then posted an instrumented report
+against their own unit
+([issue #5](https://github.com/david2069/franklinwh-modbus/issues/5#issuecomment-4529319648)),
+which independently confirms the M701–M715 model set and establishes two things
+the prose only asserted: the SunSpec chain sits at **base 0** (pysunspec2 places
+M701 at address 70, M704 at 296, M713 at 1033, and a sweep finds 40000+ and
+50000+ return illegal-address), and a **write can succeed at protocol level
+without applying** — a write to a spec-read-only register answered with a success
+echo carrying the *stored* value rather than an exception. That second point is
+why the write-side asks in
+[#156](https://github.com/home-assistant-libs/modbus-connection/issues/156) grew
+a readback-verification item.
 
 ### 1. An unimplemented scale factor should not erase the point.
 
