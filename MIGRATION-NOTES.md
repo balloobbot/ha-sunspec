@@ -131,9 +131,17 @@ exercise real addresses and framing rather than a stand-in client.
 
 ## 3. What could modbus-connection do better to support this library?
 
-Ordered by how much pain each caused. One more looked like a gap and turned out
-not to be, and two were found against 4.1.0 and are **already fixed in 4.3.0** —
-both at the end of this section.
+Ordered by how much pain each caused, and annotated with whether real hardware
+actually needs it — spec completeness on its own is not a reason to change the
+library. Gaps 2 and 6 are recorded as **not worth doing**; one more looked like a
+gap and turned out not to be, and two were found against 4.1.0 and are **already
+fixed in 4.3.0** — both at the end of this section.
+
+The evidence for "real hardware" throughout is a **FranklinWH aGate** dump
+(firmware `V10R01B04D00`, models 1, 502, 701–715) found in the surveyed corpus,
+plus `solaredge-modbus-multi`'s handling of the same cases. Where the only
+evidence is this repo's `tests/test_data/inverter.json`, that is a *synthetic*
+pysunspec2 fixture and is called out as such.
 
 ### 1. An unimplemented scale factor should not erase the point.
 
@@ -145,32 +153,44 @@ decodes to **`None`**. Three states collapse into one:
 - the *scale factor* is unimplemented → `None` (wrong)
 - the scale factor is garbage → `None` (correct, and the guard is a good idea)
 
-pysunspec2, pysunspec and async-sunspec all treat an unimplemented factor as
-scale 1 and hand back the raw value. Real dumps do this constantly: in this
-repo's test device, model 103's `A_SF`, `W_SF`, `Hz_SF` … are all unimplemented
-while `A`, `W`, `Hz` are populated. Taken literally, migrating cost model 103
-**20 of its 23 sensors**.
+pysunspec2 and pysunspec treat an unimplemented factor as scale 1 and hand back
+the raw value, so this integration had to as well: the test device's model 103
+leaves `A_SF`, `W_SF`, `Hz_SF` … unimplemented while `A`, `W`, `Hz` are
+populated, and taking modbus-connection's decoding literally cost model 103
+**20 of its 23 sensors**. Reproducing pysunspec2's behaviour needs the raw value,
+and there is no way to ask a component for one — hence declaring every scaled
+point twice.
 
-Working around it needs the raw value, and there is no way to ask a component
-for one — hence declaring every scaled point twice. Concretely, either:
+**But the real-world basis for changing the library is weak, and worth stating
+plainly.** `tests/test_data/inverter.json` is a *synthetic* pysunspec2 fixture
+("SunSpecTest", serial `sn-123456789`), not a device dump. On the one real
+multi-model dump in the surveyed corpus — a FranklinWH aGate, firmware
+`V10R01B04D00` — **all 55 `sunssf` registers hold valid in-range exponents**;
+none is unimplemented. And `solaredge-modbus-multi`, a real and widely used
+integration, deliberately returns `None` when a scale factor is unimplemented
+*or* out of the -10..10 range — i.e. it agrees with modbus-connection, not with
+pysunspec2.
 
-- decode an SF holding its *unimplemented sentinel* as "no scaling" rather than
-  as an out-of-range exponent (distinct from the garbage-exponent case), or
-- expose the pre-scale value, e.g. `component.raw("field")` /
-  `NumberField.raw_value`, so one declaration serves both.
+So modbus-connection's decoding is defensible, and the twin-field trick here
+buys **behavioural parity with the old integration**, not correctness on any
+device anyone has shown. What survives as a genuine gap is narrower: a component
+cannot expose a field's pre-scale value at all. `async_read_raw()` re-reads the
+device, so it does not answer "what was the raw value behind this decoded field
+on the last poll". A `component.raw("field")` would serve diagnostics as well as
+this workaround.
 
-The first is what every other SunSpec reader does. The second is more generally
-useful — diagnostics want it too.
+### 2. `scale_in_block` should be per field, not per component — *no real-world case*
 
-### 2. `scale_in_block` should be per field, not per component.
+It is a class attribute, so a repeating block carries *all* its scale factors or
+none. The one definition that mixes them is model **63001**, whose repeating
+block references two factors inside itself and one in the model's fixed block;
+the offending point is dropped and logged.
 
-It is a class attribute, so a repeating block either carries *all* its scale
-factors or *none*. Model 63001's repeating block references two factors inside
-itself and one in the model's shared fixed block, and there is no way to express
-that: the point is dropped and logged. One point out of the whole catalogue —
-but the fix is small (`uint16(0, scale_register=1, scale_in_block=True)`) and it
-removes a whole class of "cannot express" from a consumer that must handle
-arbitrary maps.
+Recording this as **not worth doing**. 63001 and 63002 are SunSpec's own *test*
+models, and no real device in the surveyed corpus implements either. Model 133 is
+the only shipped definition that keeps scale factors inside a repeating block for
+real, and it references *only* its own — which `scale_in_block=True` already
+handles correctly. So the cost of the limitation is one point in a test model.
 
 ### 3. A `repeating_group`'s count register moves with the instance
 
@@ -188,6 +208,23 @@ count curve points by `NPt`, and 707–710 do it three levels deep, with `NPt`
 always in the model's fixed block. **Give counts the same treatment**, ideally
 defaulting to "stay put" for symmetry with `scale_register`.
 
+**This is shipping hardware, not spec completeness.** A FranklinWH aGate
+(firmware `V10R01B04D00`) implements models 1, 502 and 701–715, with the nested
+counts populated:
+
+| Model | | Counts read from the device |
+| --- | --- | --- |
+| 705 | DERVoltVar | `NCrv` = 3, `NPt` = 4 |
+| 706 | DERVoltWatt | `NCrv` = 2, `NPt` = 2 |
+| 707–710 | DERTrip LV/HV/LF/HF | `NCrvSet` = 2, `NPt` = 5 |
+| 711 | DERFreqDroop | `NCtl` = 2 |
+| 712 | DERWattVar | `NCrv` = 2, `NPt` = 6 |
+| 714 | DERMeasureDC | `NPrt` = 1 |
+
+Non-zero at both levels, so the nested groups genuinely exist and are genuinely
+sized at runtime. Any battery or inverter certified to IEEE 1547-2018 carries
+this model set.
+
 ### 4. `stride` has to be a static `int`
 
 So a block containing a runtime-counted group cannot be placed. Model 705's
@@ -202,6 +239,10 @@ Either accept a resolved-at-build-time stride through a documented API, or offer
 a `async_resolve(unit)` step that reads a layout's count registers once and hands
 back the sized component. Every consumer of a nested SunSpec model needs this;
 none of them should hand-roll it.
+
+Same real hardware as gap 3: the aGate's model 705 reports `NPt` = 4, so its
+curve block is 19 registers, and nothing can be placed after it until that read
+has happened.
 
 The same root cause makes a group that *follows* a runtime-counted group
 impossible to place (`build_layout` rejects it explicitly). No shipped
@@ -218,14 +259,30 @@ into 4 block reads. It also does not get `SunSpecComponent`'s header
 verification. It already produces the same read items as a `Component`; letting
 it into a group would have made this migration considerably smaller.
 
-### 6. Document the runtime-built component.
+One thing this would need: `ManualComponent.add()` / `remove()` invalidate its
+own cached plan, but a `ComponentGroup` caches a plan built from its members'
+read items and has no way to hear about that. So joining a group has to come with
+a way to **freeze** the component — either an explicit seal that makes further
+`add()`/`remove()` raise, or group membership itself invalidating the group's plan
+on mutation. Without one, a mutated member silently reads against a stale plan,
+which is a worse failure than the limitation it removes.
 
-`type("Name", (Component,), namespace)` works perfectly and is the only way to
-be generic over a catalogue of maps. It is also entirely undocumented and
-untested by the library, which makes it feel like something that could break in
-a refactor. Either bless it with a `Component.build(name, fields)` helper and a
-test, or say in the docs that `__init_subclass__` field collection is a
-supported extension point.
+### 6. The runtime-built component stays unsupported — *by decision*
+
+`type("Name", (Component,), namespace)` works perfectly and is the only way to be
+generic over a catalogue of maps: `__init_subclass__` collects fields by walking
+`vars()`, `__set_name__` fires, descriptors bind, `repeating_group` fields land in
+the right bucket. It is also entirely undocumented and untested by the library.
+
+Asked whether it should be blessed with a `Component.build()` helper, the answer
+was no — it is a hack the library does not want to endorse, and this integration
+is already doing something unusual by manufacturing its map on demand. Recorded
+here as the risk it is: the load-bearing assumption of this whole migration rests
+on behaviour with no test protecting it, so a refactor of field collection could
+break ha-sunspec without breaking anything in modbus-connection's own suite. The
+mitigation is on this side — `tests/test_model.py::test_every_shipped_definition_compiles`
+compiles all 106 model definitions, and would fail loudly if the mechanism ever
+stopped working.
 
 ### Investigated and dropped: multiple base addresses
 
