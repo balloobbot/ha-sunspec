@@ -179,9 +179,14 @@ async def test_pooled_read_spans_model_boundaries(hass, sunspec_client_mock):
         assert low <= event.address
         assert event.address + event.count - 1 <= high
 
-    # Models 1 and 103 sit back to back, so the first block fills up to the
-    # request ceiling and runs on into model 103 rather than stopping at the
-    # last point of model 1.
+    # Every model of the test device costs 17 requests with the chain declared,
+    # and 24 without it - a model whose last point is a pad ends the block there.
+    assert len(unit.read_events) == 17
+
+    # Model 304 sits between models 1 and 103 and is not in this read, but the
+    # chain is readable throughout, so the first block fills up to the request
+    # ceiling and runs on into model 103 rather than stopping at the last point
+    # of model 1.
     unit.read_events.clear()
     await api.async_read({1, 103})
     first = unit.read_events[0]

@@ -126,11 +126,17 @@ What it *does* do is use public API in ways the docs don't cover:
   scan*: a SunSpec chain is one contiguous run of registers — each model's header
   says where the next one starts — so `SunSpecModels.chain` and `SunSpecModel.span`
   give the exact extent the device answers, and every component gets it set per
-  instance. Without it, 4.4's planner keeps each model's reads inside the addresses
+  instance. Without it, the planner keeps each model's reads inside the addresses
   that model claims by itself, and a trailing `pad` point is enough to stop a block
   at a model boundary: reading all 16 models of the test device costs 24 requests
-  instead of 17. Declaring only each model's *own* block is worse than both (29) —
-  adjacent declared ranges are never merged, so every boundary becomes a cut.
+  instead of 17. Declaring only each model's *own* block cost 29 under 4.4, where
+  adjacent declared ranges were never merged, so every boundary became a cut. 4.5
+  coalesces ranges that touch, which brings that form level with the chain (17) for
+  a read of every model — but not for a read of some of them, which is what the
+  integration does: a model the user has not enabled is then a hole in the declared
+  map, and a block stops at it. Over 470 sampled subsets of the test device's
+  models, the chain declaration is never worse and is one request better in 118 of
+  them, so the chain stays.
 
 In the tests: `MockModbusConnection` is subclassed to accept the params/kwargs
 the real constructor takes and to preload registers, and `unit.fail_read()` /
