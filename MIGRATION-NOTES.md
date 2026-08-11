@@ -2,7 +2,7 @@
 
 This integration used to talk to devices through **pysunspec2**'s synchronous
 Modbus client, driven from Home Assistant's executor. It now talks
-**modbus-connection 4.4.0** (tmodbus backend) and keeps pysunspec2 only for the
+**modbus-connection 4.5.1** (tmodbus backend) and keeps pysunspec2 only for the
 SunSpec model definitions it ships — the JSON catalogue, never the transport.
 
 What changed, in one paragraph: `custom_components/sunspec/model.py` compiles a
@@ -129,14 +129,9 @@ What it *does* do is use public API in ways the docs don't cover:
   instance. Without it, the planner keeps each model's reads inside the addresses
   that model claims by itself, and a trailing `pad` point is enough to stop a block
   at a model boundary: reading all 16 models of the test device costs 24 requests
-  instead of 17. Declaring only each model's *own* block cost 29 under 4.4, where
-  adjacent declared ranges were never merged, so every boundary became a cut. 4.5
-  coalesces ranges that touch, which brings that form level with the chain (17) for
-  a read of every model — but not for a read of some of them, which is what the
-  integration does: a model the user has not enabled is then a hole in the declared
-  map, and a block stops at it. Over 470 sampled subsets of the test device's
-  models, the chain declaration is never worse and is one request better in 118 of
-  them, so the chain stays.
+  instead of 17. Declaring only each model's *own* block is worse than both (29) —
+  a merge keeps every boundary any component's map draws, so every model boundary
+  becomes a cut.
 
 In the tests: `MockModbusConnection` is subclassed to accept the params/kwargs
 the real constructor takes and to preload registers, and `unit.fail_read()` /
