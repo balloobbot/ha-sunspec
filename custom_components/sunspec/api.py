@@ -138,6 +138,13 @@ def _group_point(group, name) -> PointLayout | None:
     return next((p for p in group.points if p.name == name), None)
 
 
+def _chain_range(models: SunSpecModels) -> tuple[int, int]:
+    """The addresses the discovered model chain occupies, first to last."""
+    chain = models.chain
+    last = chain[-1]
+    return chain[0].address, last.address + last.span - 1
+
+
 def _read_point(point: PointLayout, component) -> SunSpecPoint:
     """Read a point's decoded value off the component holding it."""
     scaled = getattr(component, point.attr, None)
@@ -251,7 +258,8 @@ class SunSpecApiClient:
         """Build the components for a model ID; False if the device lacks it."""
         if model_id in self._components:
             return True
-        found = (await self._async_scan()).get(model_id)
+        models = await self._async_scan()
+        found = models.get(model_id)
         if not found:
             return False
         model_def = get_model_def(model_id)
@@ -259,6 +267,7 @@ class SunSpecApiClient:
             _LOGGER.info("Skipping model %s: no SunSpec definition", model_id)
             return False
 
+        chain_low, chain_high = _chain_range(models)
         instances = []
         for model in found:
             try:
@@ -274,6 +283,17 @@ class SunSpecApiClient:
                 )
                 continue
             component = build_component_class(layout)(self._unit, model)
+            # A SunSpec chain is one contiguous run of registers - every model's
+            # header says where the next one starts - and the scan walked it end
+            # to end, so the device answers every address in it. Saying so lets a
+            # pooled block read cross the boundary between two models instead of
+            # stopping at the last point of one; without it the planner keeps
+            # each model's reads to the addresses that model claims by itself.
+            # Readable ranges are declared in the component's own coordinates,
+            # which the model's address shifts.
+            component.register_ranges = (
+                (chain_low - model.address, chain_high - model.address),
+            )
             instances.append((layout, component))
 
         if not instances:

@@ -2,7 +2,7 @@
 
 This integration used to talk to devices through **pysunspec2**'s synchronous
 Modbus client, driven from Home Assistant's executor. It now talks
-**modbus-connection 4.3.0** (tmodbus backend) and keeps pysunspec2 only for the
+**modbus-connection 4.4.0** (tmodbus backend) and keeps pysunspec2 only for the
 SunSpec model definitions it ships — the JSON catalogue, never the transport.
 
 What changed, in one paragraph: `custom_components/sunspec/model.py` compiles a
@@ -121,6 +121,17 @@ What it *does* do is use public API in ways the docs don't cover:
   `unit.read_holding_registers()` directly to resolve a nested group's count
   before the layout can be built (gaps 3 and 4).
 
+- **The readable map is discovered, not declared.** `register_ranges` is normally
+  written into a component class by its author. Here the map is a *result of the
+  scan*: a SunSpec chain is one contiguous run of registers — each model's header
+  says where the next one starts — so `SunSpecModels.chain` and `SunSpecModel.span`
+  give the exact extent the device answers, and every component gets it set per
+  instance. Without it, 4.4's planner keeps each model's reads inside the addresses
+  that model claims by itself, and a trailing `pad` point is enough to stop a block
+  at a model boundary: reading all 16 models of the test device costs 24 requests
+  instead of 17. Declaring only each model's *own* block is worse than both (29) —
+  adjacent declared ranges are never merged, so every boundary becomes a cut.
+
 In the tests: `MockModbusConnection` is subclassed to accept the params/kwargs
 the real constructor takes and to preload registers, and `unit.fail_read()` /
 `simulate_connection_lost()` drive the failure paths. The register map itself is
@@ -133,9 +144,10 @@ exercise real addresses and framing rather than a stand-in client.
 
 Ordered by how much pain each caused, and annotated with whether real hardware
 actually needs it — spec completeness on its own is not a reason to change the
-library. Gaps 2 and 6 are recorded as **not worth doing**; one more looked like a
-gap and turned out not to be, and two were found against 4.1.0 and are **already
-fixed in 4.3.0** — both at the end of this section.
+library. Gaps 2 and 6 are recorded as **not worth doing**; gap 5 was **closed in
+4.4.0** and is kept for the reason the integration still does not take it up; one
+more looked like a gap and turned out not to be, and two were found against 4.1.0
+and are **already fixed in 4.3.0** — both at the end of this section.
 
 The evidence for "real hardware" throughout is a **FranklinWH aGate** dump
 (firmware `V10R01B04D00`, models 1, 502, 701–715) plus `solaredge-modbus-multi`'s
@@ -288,24 +300,30 @@ The same root cause makes a group that *follows* a runtime-counted group
 impossible to place (`build_layout` rejects it explicitly). No shipped
 definition does that today, but it is a structural limit worth naming.
 
-### 5. Let a `ManualComponent` join a `ComponentGroup`.
+### 5. Let a `ManualComponent` join a `ComponentGroup` — *done in 4.4.0*
 
 `ManualComponent` is the documented answer to "the layout comes from config
 rather than a typed class", and it was the obvious first choice here — keys are
 arbitrary strings, `add()` takes `repeating_group` targets, no attribute-name
-mangling needed. It was rejected for one reason: **it cannot be pooled into a
+mangling needed. It was rejected for one reason: **it could not be pooled into a
 `ComponentGroup`**, and pooling is what turns a poll from one-request-per-model
-into 4 block reads. It also does not get `SunSpecComponent`'s header
-verification. It already produces the same read items as a `Component`; letting
-it into a group would have made this migration considerably smaller.
+into 4 block reads. It already produced the same read items as a `Component`;
+letting it into a group would have made this migration considerably smaller.
 
-One thing this would need: `ManualComponent.add()` / `remove()` invalidate its
-own cached plan, but a `ComponentGroup` caches a plan built from its members'
-read items and has no way to hear about that. So joining a group has to come with
-a way to **freeze** the component — either an explicit seal that makes further
-`add()`/`remove()` raise, or group membership itself invalidating the group's plan
-on mutation. Without one, a mutated member silently reads against a stale plan,
-which is a worse failure than the limitation it removes.
+The stale-plan objection raised here — `add()` / `remove()` invalidate the
+component's own cached plan, but a `ComponentGroup` caches a plan built from its
+members' read items and had no way to hear about that — is what 4.4.0 answered:
+a member holds a reference to the group and invalidation propagates to it, so a
+mutation re-plans the pooled read rather than silently reading against a stale
+one.
+
+**The integration still does not switch, and the reason is the one thing that
+list left out**: a `ManualComponent` is not a `SunSpecComponent`, so it does not
+verify the model header it read against the model the scan discovered. That check
+and its `SunSpecMapShiftError` are what turn a firmware update that inserts a
+model into a config-entry reload instead of silently wrong sensors — see the last
+section. Trading it for a smaller compiler is a bad trade for a device library
+whose addresses all come from a scan. The `type()`-built subclass in gap 6 stays.
 
 ### 6. The runtime-built component stays unsupported — *by decision*
 

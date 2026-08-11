@@ -156,6 +156,39 @@ async def test_pooled_read(hass, sunspec_client_mock):
     await api.async_close()
 
 
+async def test_pooled_read_spans_model_boundaries(hass, sunspec_client_mock):
+    """A block read covers whatever fits, model boundaries included.
+
+    The components declare the discovered chain as readable, so a block is cut
+    by the per-request register ceiling rather than by the end of a model - and
+    never reaches past the chain into addresses the scan never saw.
+    """
+    api = SunSpecApiClient(host="test", port=123, unit_id=1)
+    every = set(await api.async_get_models())
+    await api.async_read(every)
+
+    unit = api._unit
+    unit.read_events.clear()
+    await api.async_read(every)
+
+    models = await api._async_scan()
+    chain = models.chain
+    low = chain[0].address
+    high = chain[-1].address + chain[-1].span - 1
+    for event in unit.read_events:
+        assert low <= event.address
+        assert event.address + event.count - 1 <= high
+
+    # Models 1 and 103 sit back to back, so the first block fills up to the
+    # request ceiling and runs on into model 103 rather than stopping at the
+    # last point of model 1.
+    unit.read_events.clear()
+    await api.async_read({1, 103})
+    first = unit.read_events[0]
+    assert first.address + first.count - 1 >= models.first(103).address
+    await api.async_close()
+
+
 async def test_disconnect_between_polls(hass, sunspec_client_mock):
     """The link is dropped between polls and re-established on the next read."""
     api = SunSpecApiClient(host="test", port=123, unit_id=1)
