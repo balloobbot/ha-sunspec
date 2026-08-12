@@ -3,5 +3,5 @@ pre-commit==4.5.1
 black==26.3.1
 flake8==7.3.0
 homeassistant
-modbus-connection[tmodbus]>=4.6.0
+modbus-connection[tmodbus]>=4.6.1
 pysunspec2==1.1.5
