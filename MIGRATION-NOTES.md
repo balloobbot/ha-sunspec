@@ -2,7 +2,7 @@
 
 This integration used to talk to devices through **pysunspec2**'s synchronous
 Modbus client, driven from Home Assistant's executor. It now talks
-**modbus-connection 4.5.1** (tmodbus backend) and keeps pysunspec2 only for the
+**modbus-connection 4.6.0** (tmodbus backend) and keeps pysunspec2 only for the
 SunSpec model definitions it ships — the JSON catalogue, never the transport.
 
 What changed, in one paragraph: `custom_components/sunspec/model.py` compiles a
@@ -128,8 +128,8 @@ What it *does* do is use public API in ways the docs don't cover:
   give the exact extent the device answers, and every component gets it set per
   instance. Without it, the planner keeps each model's reads inside the addresses
   that model claims by itself, and a trailing `pad` point is enough to stop a block
-  at a model boundary: reading all 16 models of the test device costs 24 requests
-  instead of 17. Declaring only each model's *own* block is worse than both (29) —
+  at a model boundary: reading all 16 models of the test device costs 13 requests
+  instead of 7. Declaring only each model's *own* block is worse than both (19) —
   a merge keeps every boundary any component's map draws, so every model boundary
   becomes a cut.
 
