@@ -30,23 +30,6 @@ IN_MODEL_103 = 40100
 # Model 705 sizes its curve group from the count point here, which the build
 # reads before the model can be polled at all.
 MODEL_705_COUNT = 40595
-# Model 103's Evt1 bitfield, 40 registers past its header.
-MODEL_103_EVT1 = 40130
-
-
-@pytest.fixture
-def one_bit_event_device():
-    """The test device, with model 103's event bitfield down to a single bit.
-
-    Two bits make the sensor platform hand Home Assistant a comma-joined state
-    its ENUM options do not list, which raises out of any coordinator refresh.
-    That is a pre-existing fault of the bitfield rendering, not of the poll.
-    """
-    registers = sunspec_holding_registers(TEST_DEVICE)
-    registers[MODEL_103_EVT1] = 0
-    registers[MODEL_103_EVT1 + 1] = 1
-    with patch_sunspec_device(registers=registers):
-        yield
 
 
 async def test_a_failed_model_leaves_the_rest_fresh(hass, sunspec_client_mock):
@@ -152,7 +135,7 @@ async def test_reading_a_single_model_raises_its_error(hass, sunspec_client_mock
 
 
 async def test_only_the_failed_models_sensors_go_unavailable(
-    hass: HomeAssistant, one_bit_event_device
+    hass: HomeAssistant, sunspec_client_mock
 ) -> None:
     """The device keeps reporting; the model that did not answer does not."""
     config_entry = await setup_mock_sunspec_config_entry(hass)
@@ -215,7 +198,7 @@ async def test_an_unserved_address_moves_on_to_the_next(hass):
 
 
 async def test_a_dead_device_marks_every_sensor_unavailable(
-    hass: HomeAssistant, one_bit_event_device
+    hass: HomeAssistant, sunspec_client_mock
 ) -> None:
     """Containment is per model; a device answering nothing is still a failure."""
     config_entry = await setup_mock_sunspec_config_entry(hass)

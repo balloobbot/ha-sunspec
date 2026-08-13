@@ -64,7 +64,7 @@ HA_META = {
     "%": [PERCENTAGE, ICON_DEFAULT, None],
     "Secs": [UnitOfTime.SECONDS, ICON_DEFAULT, None],
     "enum16": [None, ICON_DEFAULT, SensorDeviceClass.ENUM],
-    "bitfield32": [None, ICON_DEFAULT, SensorDeviceClass.ENUM],
+    "bitfield32": [None, ICON_DEFAULT, None],
 }
 
 
@@ -131,7 +131,11 @@ class SunSpecSensor(SunSpecEntity, SensorEntity):
         )
 
         vtype = self._meta["type"]
-        if vtype in ("enum16", "bitfield32"):
+        # A bitfield reports every flag that is set, so its state is a joined
+        # list rather than one of a fixed set of options - not an ENUM.
+        if vtype == "bitfield32":
+            self.use_device_class = None
+        elif vtype == "enum16":
             self._options = self._point_meta.get("symbols", None)
             if self._options is None:
                 self.use_device_class = None
