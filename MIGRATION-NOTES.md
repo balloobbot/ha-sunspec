@@ -9,9 +9,10 @@ What changed, in one paragraph: `custom_components/sunspec/model.py` compiles a
 SunSpec model definition plus a discovered model's address and length into a
 `SunSpecComponent` subclass at runtime; `api.py` scans the model chain with
 `modbus_connection.model.sunspec.scan`, builds one component per discovered
-model, and pools them all into a single `ComponentGroup`. `sensor.py` and
-`entity.py` were not touched at all — `SunSpecModelWrapper` kept its
-`getKeys` / `getValue` / `getMeta` / `getGroupMeta` / `getPoint().pdef` surface.
+model, and refreshes each of them on its own. `entity.py` was not touched at
+all, and `sensor.py` only gained an `available` property — `SunSpecModelWrapper`
+kept its `getKeys` / `getValue` / `getMeta` / `getGroupMeta` /
+`getPoint().pdef` surface.
 
 Two results worth stating up front, because they set the tone for everything
 below:
@@ -22,7 +23,14 @@ below:
   code produces **byte-identical keys and values** to the pysunspec2
   implementation — every model, every point, every repeated instance. A poll of
   the default-enabled models went from a `sleep(0.6)` plus a full-model read per
-  model to **4 pooled block reads** paced 0.1 s apart.
+  model to **6 block reads** paced 0.1 s apart.
+
+A poll used to pool every model into one `ComponentGroup`. It no longer does:
+`ReadPlan.execute` stores nothing until every block in the plan has been read,
+so one block a device was slow to answer discarded the entire poll and left all
+of the integration's sensors unavailable. Models are read one at a time now, and
+a `ModbusError` costs only its own model — see "When a device answers only part
+of a poll" in the README. The reads below are counted per model accordingly.
 
 ---
 
@@ -126,12 +134,11 @@ What it *does* do is use public API in ways the docs don't cover:
   scan*: a SunSpec chain is one contiguous run of registers — each model's header
   says where the next one starts — so `SunSpecModels.chain` and `SunSpecModel.span`
   give the exact extent the device answers, and every component gets it set per
-  instance. Without it, the planner keeps each model's reads inside the addresses
-  that model claims by itself, and a trailing `pad` point is enough to stop a block
-  at a model boundary: reading all 16 models of the test device costs 13 requests
-  instead of 7. Declaring only each model's *own* block is worse than both (19) —
-  a merge keeps every boundary any component's map draws, so every model boundary
-  becomes a cut.
+  instance. It mattered most while models were pooled — a trailing `pad` point was
+  enough to stop a block at a model boundary, and declaring the chain took all 16
+  models of the test device from 13 requests to 7. Reading models one at a time
+  costs 19 requests either way on this device, and the declaration now only lets a
+  block bridge whatever a model leaves unread between its own points.
 
 In the tests: `MockModbusConnection` is subclassed to accept the params/kwargs
 the real constructor takes and to preload registers, and `unit.fail_read()` /
@@ -397,5 +404,5 @@ not because they still need doing.
 - `SunSpecComponent`'s header verification plus `SunSpecMapShiftError` is a
   genuinely good idea that the pysunspec2-based code had no equivalent of: a
   firmware update that inserts a model used to silently produce garbage.
-- Pooled `ComponentGroup` reads and `message_spacing` between them replaced a
-  pile of hand-rolled sleeping with two lines of configuration.
+- Planned block reads and `message_spacing` between them replaced a pile of
+  hand-rolled sleeping with two lines of configuration.
