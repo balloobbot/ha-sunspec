@@ -63,6 +63,15 @@ custom_components/sunspec/sensor.py
 
 <!---->
 
+## When a device answers only part of a poll
+
+Each enabled model is read on its own, so a model the device is too slow or too
+busy to answer costs only its own sensors: they go unavailable while every other
+model's sensors keep updating, and the model is named with its error in the log
+once, not once per poll. Its last values are still there and come back as soon
+as the device answers again. Only a device that stops answering altogether
+marks every sensor of the integration unavailable.
+
 ## Contributions are welcome!
 
 If you want to contribute to this please read the [Contribution guidelines](CONTRIBUTING.md)
