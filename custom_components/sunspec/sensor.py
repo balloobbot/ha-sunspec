@@ -144,6 +144,14 @@ class SunSpecSensor(SunSpecEntity, SensorEntity):
                 self._options = [item["name"] for item in self._options]
                 self._options.append("")
 
+        # An accumulator that disappears while its model is silent leaves gaps in
+        # long term statistics, and inverters go quiet every night. Those points
+        # keep reporting their last reading instead.
+        self.always_available = self.state_class in (
+            SensorStateClass.TOTAL,
+            SensorStateClass.TOTAL_INCREASING,
+        )
+
         self._device_id = config_entry.entry_id
         name = self._group_meta.get("name", str(self.model_id))
         if self.model_index > 0:
@@ -202,9 +210,14 @@ class SunSpecSensor(SunSpecEntity, SensorEntity):
 
         The values are still there when it did not, but they are as old as the
         failure, so only this model's sensors go unavailable - the rest of the
-        device keeps reporting.
+        device keeps reporting. Accumulators are exempt: a stale total is worth
+        more to statistics than no total at all.
         """
-        return super().available and self.poll_key not in self.coordinator.report.failed
+        if not super().available:
+            return False
+        return (
+            self.always_available or self.poll_key not in self.coordinator.report.failed
+        )
 
     @property
     def native_value(self):

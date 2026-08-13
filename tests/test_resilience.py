@@ -5,6 +5,7 @@ was too slow to answer discarded every model's data and left the whole device
 unavailable. Each model instance is now read on its own.
 """
 
+from homeassistant.components.sensor import SensorStateClass
 from homeassistant.const import STATE_UNAVAILABLE
 from homeassistant.core import HomeAssistant
 from modbus_connection import IllegalDataAddressError
@@ -17,6 +18,7 @@ from custom_components.sunspec.api import SunSpecApiClient
 from custom_components.sunspec.const import DOMAIN
 
 from . import TEST_INVERTER_SENSOR_DC_ENTITY_ID
+from . import TEST_INVERTER_SENSOR_ENERGY_ENTITY_ID
 from . import TEST_INVERTER_SENSOR_POWER_ENTITY_ID
 from . import setup_mock_sunspec_config_entry
 from .conftest import BASE_ADDRESS
@@ -166,6 +168,34 @@ async def test_only_the_failed_models_sensors_go_unavailable(
     assert (
         hass.states.get(TEST_INVERTER_SENSOR_POWER_ENTITY_ID).state != STATE_UNAVAILABLE
     )
+
+
+async def test_an_accumulator_outlives_its_models_failure(
+    hass: HomeAssistant, sunspec_client_mock
+) -> None:
+    """Lifetime energy holds its last reading; the instantaneous points do not.
+
+    Both points sit in model 103, so the same failed poll reaches both. Dropping
+    the total would tear a hole in long term statistics and the energy dashboard
+    every time the inverter went quiet.
+    """
+    config_entry = await setup_mock_sunspec_config_entry(hass)
+    coordinator = hass.data[DOMAIN][config_entry.entry_id]
+    energy_before = hass.states.get(TEST_INVERTER_SENSOR_ENERGY_ENTITY_ID)
+    assert energy_before.attributes["state_class"] == SensorStateClass.TOTAL_INCREASING
+
+    coordinator.api._unit.fail_read(
+        IN_MODEL_103, ModbusTimeoutError("slow inverter block")
+    )
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+
+    assert set(coordinator.report.failed) == {"103:0"}
+    assert (
+        hass.states.get(TEST_INVERTER_SENSOR_POWER_ENTITY_ID).state == STATE_UNAVAILABLE
+    )
+    energy = hass.states.get(TEST_INVERTER_SENSOR_ENERGY_ENTITY_ID)
+    assert energy.state == energy_before.state != STATE_UNAVAILABLE
 
 
 async def test_a_busy_device_is_not_read_as_a_missing_map(hass):

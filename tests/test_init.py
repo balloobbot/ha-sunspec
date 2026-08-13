@@ -31,6 +31,7 @@ async def test_setup_unload_and_reload_entry(hass, sunspec_client_mock):
     # Use the config entries manager so entry state transitions match real setup.
     assert await hass.config_entries.async_setup(config_entry.entry_id)
     await hass.async_block_till_done()
+    assert config_entry.state is ConfigEntryState.LOADED
     assert DOMAIN in hass.data and config_entry.entry_id in hass.data[DOMAIN]
     assert (
         type(hass.data[DOMAIN][config_entry.entry_id]) is SunSpecDataUpdateCoordinator
