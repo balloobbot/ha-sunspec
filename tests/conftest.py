@@ -13,6 +13,8 @@ from modbus_connection.mock import MockModbusConnection
 import pytest
 import sunspec2.file.client as file_client
 
+from custom_components.sunspec.api import SunSpecModelWrapper
+
 pytest_plugins = "pytest_homeassistant_custom_component"
 _LOGGER: logging.Logger = logging.getLogger(__package__)
 
@@ -174,6 +176,22 @@ def connect_error_on_get_data():
     with patch_sunspec_device(), patch(
         "custom_components.sunspec.SunSpecApiClient.async_read",
         side_effect=ModbusConnectionError,
+    ):
+        yield
+
+
+@pytest.fixture
+def zero_energy_reading():
+    """Simulate a device that answers 0 for its lifetime energy counter."""
+    real_get_value = SunSpecModelWrapper.getValue
+
+    def my_side_effect(self, point_name, model_index=0):
+        if point_name == "WH":
+            return 0
+        return real_get_value(self, point_name, model_index)
+
+    with patch.object(
+        SunSpecModelWrapper, "getValue", autospec=True, side_effect=my_side_effect
     ):
         yield
 

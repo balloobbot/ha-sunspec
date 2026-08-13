@@ -8,11 +8,15 @@ unavailable. Each model instance is now read on its own.
 from homeassistant.components.sensor import SensorStateClass
 from homeassistant.const import STATE_UNAVAILABLE
 from homeassistant.core import HomeAssistant
+from homeassistant.core import State
 from modbus_connection import IllegalDataAddressError
 from modbus_connection import ModbusConnectionError
 from modbus_connection import ModbusTimeoutError
 from modbus_connection import ServerDeviceBusyError
 import pytest
+from pytest_homeassistant_custom_component.common import (
+    mock_restore_cache_with_extra_data,
+)
 
 from custom_components.sunspec.api import SunSpecApiClient
 from custom_components.sunspec.const import DOMAIN
@@ -238,6 +242,30 @@ async def test_a_newly_failed_model_is_logged_once(
     await hass.async_block_till_done()
 
     assert caplog.text.count("Failed to fetch 103:0") == 1
+
+
+async def test_a_total_keeps_its_value_across_a_restart(
+    hass: HomeAssistant, sunspec_client_mock, zero_energy_reading
+) -> None:
+    """A counter picks up where it left off rather than starting over.
+
+    An inverter that is asleep reports no energy at all, so without the restored
+    value the counter would come back from a restart empty and long term
+    statistics would treat the next reading as a fresh start.
+    """
+    mock_restore_cache_with_extra_data(
+        hass,
+        (
+            (
+                State(TEST_INVERTER_SENSOR_ENERGY_ENTITY_ID, "1234"),
+                {"native_value": 1234, "native_unit_of_measurement": "Wh"},
+            ),
+        ),
+    )
+
+    await setup_mock_sunspec_config_entry(hass)
+
+    assert hass.states.get(TEST_INVERTER_SENSOR_ENERGY_ENTITY_ID).state == "1234"
 
 
 async def test_a_busy_device_is_not_read_as_a_missing_map(hass):

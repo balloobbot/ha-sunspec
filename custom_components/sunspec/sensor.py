@@ -1,5 +1,6 @@
 """Sensor platform for SunSpec."""
 
+from functools import cached_property
 import logging
 
 from homeassistant.components.sensor import RestoreSensor
@@ -22,6 +23,7 @@ from homeassistant.const import UnitOfReactivePower
 from homeassistant.const import UnitOfSpeed
 from homeassistant.const import UnitOfTemperature
 from homeassistant.const import UnitOfTime
+from homeassistant.core import callback
 
 from . import get_sunspec_unique_id
 from .api import poll_key
@@ -121,9 +123,6 @@ class SunSpecSensor(SunSpecEntity, SensorEntity):
         self.use_icon = ha_meta[1]
         self.use_device_class = ha_meta[2]
         self._options = []
-        # Used if this is an energy sensor and the read value is 0
-        # Updated wheneve the value read is not 0
-        self.lastKnown = None
         self._assumed_state = False
 
         self._uniqe_id = get_sunspec_unique_id(
@@ -143,14 +142,6 @@ class SunSpecSensor(SunSpecEntity, SensorEntity):
                 self.use_device_class = SensorDeviceClass.ENUM
                 self._options = [item["name"] for item in self._options]
                 self._options.append("")
-
-        # An accumulator that disappears while its model is silent leaves gaps in
-        # long term statistics, and inverters go quiet every night. Those points
-        # keep reporting their last reading instead.
-        self.always_available = self.state_class in (
-            SensorStateClass.TOTAL,
-            SensorStateClass.TOTAL_INCREASING,
-        )
 
         self._device_id = config_entry.entry_id
         name = self._group_meta.get("name", str(self.model_id))
@@ -204,6 +195,14 @@ class SunSpecSensor(SunSpecEntity, SensorEntity):
     def assumed_state(self):
         return self._assumed_state
 
+    @cached_property
+    def is_total(self):
+        """Whether this point accumulates rather than measures."""
+        return self.state_class in (
+            SensorStateClass.TOTAL,
+            SensorStateClass.TOTAL_INCREASING,
+        )
+
     @property
     def available(self):
         """Whether the last poll refreshed the model instance behind this point.
@@ -219,13 +218,28 @@ class SunSpecSensor(SunSpecEntity, SensorEntity):
         unavailable, even for a device that is gone for good: whether the device
         is reachable is a question for a connectivity entity, not for a counter.
         """
-        if self.always_available:
-            return True
-        return super().available and self.poll_key not in self.coordinator.report.failed
+        return self.is_total or (
+            super().available and self.poll_key not in self.coordinator.report.failed
+        )
 
-    @property
-    def native_value(self):
-        """Return the state of the sensor."""
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        self._process_data()
+        super()._handle_coordinator_update()
+
+    async def async_added_to_hass(self) -> None:
+        """Call when entity about to be added to hass."""
+        await super().async_added_to_hass()
+        self._process_data()
+
+    def _process_data(self) -> None:
+        """Store what the last poll decoded; a total keeps what it had."""
+        value = self._read_value()
+        if value is not None or not self.is_total:
+            self._attr_native_value = value
+
+    def _read_value(self):
+        """Return what the last poll decoded for this point."""
         try:
             val = self.coordinator.data[self.model_id].getValue(
                 self.key, self.model_index
@@ -305,33 +319,24 @@ class SunSpecSensor(SunSpecEntity, SensorEntity):
 
 
 class SunSpecEnergySensor(SunSpecSensor, RestoreSensor):
-    def __init__(self, coordinator, config_entry, data):
-        super().__init__(coordinator, config_entry, data)
-        self.last_known_value = None
+    def _process_data(self) -> None:
+        """Hold the last reading unless the device answered with a real one.
 
-    @property
-    def native_value(self):
-        val = super().native_value
-        # For an energy sensor a value of 0 woulld mess up long term stats because of how total_increasing works
-        if val == 0:
-            _LOGGER.debug(
-                "Returning last known value instead of 0 for {self.name) to avoid resetting total_increasing counter"
-            )
-            self._assumed_state = True
-            return self.lastKnown
-        self.lastKnown = val
-        self._assumed_state = False
-        return val
+        A zero would reset a total_increasing counter, and a missing value would
+        gap it, so neither is written.
+        """
+        value = self._read_value()
+        self._assumed_state = not value
+        if value:
+            self._attr_native_value = value
 
     async def async_added_to_hass(self) -> None:
-        """Call when entity about to be added to hass."""
+        """Seed the counter from the state it had before the restart.
+
+        Home Assistant writes the state right after this, so the restored value
+        only has to be in place before ``_process_data()`` runs - which the base
+        class does at the end of its own ``async_added_to_hass()``.
+        """
+        if (last_data := await self.async_get_last_sensor_data()) is not None:
+            self._attr_native_value = last_data.native_value
         await super().async_added_to_hass()
-        _LOGGER.debug(f"{self.name} Fetch last known state")
-        state = await self.async_get_last_sensor_data()
-        if state:
-            _LOGGER.debug(
-                f"{self.name} Got last known value from state: {state.native_value}"
-            )
-            self.last_known_value = state.native_value
-        else:
-            _LOGGER.debug(f"{self.name} No previous state was found")
