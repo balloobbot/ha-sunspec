@@ -274,6 +274,19 @@ class SunSpecApiClient:
         models = {model_id: self._wrappers[model_id] for model_id in present}
         return models, UpdateReport(updated, failed)
 
+    async def async_read_raw(self) -> dict[str, dict[int, int | bool]]:
+        """Every register this device reads, undecoded - for diagnostics.
+
+        Walks every component built so far, so the common model that only setup
+        reads is in here alongside the polled ones.
+        """
+        raw: dict[str, dict[int, int | bool]] = {}
+        for components in self._components.values():
+            for component in components:
+                for space, values in (await component.async_read_raw()).items():
+                    raw.setdefault(space, {}).update(values)
+        return raw
+
     async def async_disconnect(self) -> None:
         """Drop the link; the next read establishes a new one.
 

@@ -54,6 +54,7 @@ custom_components/sunspec/__init__.py
 custom_components/sunspec/api.py
 custom_components/sunspec/config_flow.py
 custom_components/sunspec/const.py
+custom_components/sunspec/diagnostics.py
 custom_components/sunspec/entity.py
 custom_components/sunspec/manifest.json
 custom_components/sunspec/sensor.py
@@ -71,6 +72,13 @@ model's sensors keep updating, and the model is named with its error in the log
 once, not once per poll. Its last values are still there and come back as soon
 as the device answers again. Only a device that stops answering altogether
 marks every sensor of the integration unavailable.
+
+## Diagnostics
+
+Downloading diagnostics for the device returns every register the integration
+reads, undecoded and keyed by address, together with which models answered the
+last poll and the errors from those that did not. It is the whole picture an
+issue report needs.
 
 ## Contributions are welcome!
 
