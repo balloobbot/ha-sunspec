@@ -227,12 +227,18 @@ async def test_an_unserved_address_moves_on_to_the_next(hass):
         await api.async_close()
 
 
-async def test_a_dead_device_marks_every_sensor_unavailable(
+async def test_a_dead_device_keeps_only_its_accumulators(
     hass: HomeAssistant, sunspec_client_mock
 ) -> None:
-    """Containment is per model; a device answering nothing is still a failure."""
+    """Containment is per model; a device answering nothing is still a failure.
+
+    Every instantaneous reading goes unavailable with the link. The totals do
+    not: an inverter that powers down for the night would otherwise gap its own
+    statistics until morning, which is the whole reason they are exempt.
+    """
     config_entry = await setup_mock_sunspec_config_entry(hass)
     coordinator = hass.data[DOMAIN][config_entry.entry_id]
+    energy_before = hass.states.get(TEST_INVERTER_SENSOR_ENERGY_ENTITY_ID).state
 
     coordinator.api._unit.fail_requests(ModbusConnectionError("link down"))
     await coordinator.async_refresh()
@@ -244,3 +250,5 @@ async def test_a_dead_device_marks_every_sensor_unavailable(
         TEST_INVERTER_SENSOR_DC_ENTITY_ID,
     ):
         assert hass.states.get(entity_id).state == STATE_UNAVAILABLE
+    energy = hass.states.get(TEST_INVERTER_SENSOR_ENERGY_ENTITY_ID)
+    assert energy.state == energy_before != STATE_UNAVAILABLE

@@ -210,14 +210,18 @@ class SunSpecSensor(SunSpecEntity, SensorEntity):
 
         The values are still there when it did not, but they are as old as the
         failure, so only this model's sensors go unavailable - the rest of the
-        device keeps reporting. Accumulators are exempt: a stale total is worth
-        more to statistics than no total at all.
+        device keeps reporting, and a device that answers nothing at all takes
+        every one of them.
+
+        Accumulators are exempt from both. A counter that goes away tears a hole
+        in long term statistics and the energy dashboard, and a SunSpec inverter
+        stops answering every night. The trade is that a total never reads
+        unavailable, even for a device that is gone for good: whether the device
+        is reachable is a question for a connectivity entity, not for a counter.
         """
-        if not super().available:
-            return False
-        return (
-            self.always_available or self.poll_key not in self.coordinator.report.failed
-        )
+        if self.always_available:
+            return True
+        return super().available and self.poll_key not in self.coordinator.report.failed
 
     @property
     def native_value(self):
