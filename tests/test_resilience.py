@@ -7,8 +7,10 @@ unavailable. Each model instance is now read on its own.
 
 from homeassistant.const import STATE_UNAVAILABLE
 from homeassistant.core import HomeAssistant
+from modbus_connection import IllegalDataAddressError
 from modbus_connection import ModbusConnectionError
 from modbus_connection import ModbusTimeoutError
+from modbus_connection import ServerDeviceBusyError
 import pytest
 
 from custom_components.sunspec.api import SunSpecApiClient
@@ -17,6 +19,7 @@ from custom_components.sunspec.const import DOMAIN
 from . import TEST_INVERTER_SENSOR_DC_ENTITY_ID
 from . import TEST_INVERTER_SENSOR_POWER_ENTITY_ID
 from . import setup_mock_sunspec_config_entry
+from .conftest import BASE_ADDRESS
 from .conftest import TEST_DEVICE
 from .conftest import patch_sunspec_device
 from .conftest import sunspec_holding_registers
@@ -180,6 +183,35 @@ async def test_only_the_failed_models_sensors_go_unavailable(
     assert (
         hass.states.get(TEST_INVERTER_SENSOR_POWER_ENTITY_ID).state != STATE_UNAVAILABLE
     )
+
+
+async def test_a_busy_device_is_not_read_as_a_missing_map(hass):
+    """A refusal that is not about the address leaves the scan undecided.
+
+    Answering "no SunSpec device found" to a device that was merely busy would
+    send the config flow and every later scan down the wrong path.
+    """
+    with patch_sunspec_device(error=ServerDeviceBusyError()):
+        api = SunSpecApiClient(host="test", port=123, unit_id=1)
+        with pytest.raises(ServerDeviceBusyError):
+            await api.async_get_models()
+        await api.async_close()
+
+
+async def test_an_unserved_address_moves_on_to_the_next(hass):
+    """A device that refuses the address is simply not mapped there."""
+    registers = {
+        address - BASE_ADDRESS: word
+        for address, word in sunspec_holding_registers(TEST_DEVICE).items()
+    }
+    with patch_sunspec_device(registers=registers) as connections:
+        api = SunSpecApiClient(host="test", port=123, unit_id=1)
+        connections[0].for_unit(1).fail_read(
+            BASE_ADDRESS, IllegalDataAddressError(), register_type="holding"
+        )
+        # 40000 is refused, so the scan settles on the map at 0.
+        assert await api.async_get_models()
+        await api.async_close()
 
 
 async def test_a_dead_device_marks_every_sensor_unavailable(

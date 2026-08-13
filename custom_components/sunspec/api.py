@@ -4,9 +4,10 @@ from dataclasses import dataclass
 import logging
 from typing import Any
 
+from modbus_connection import IllegalDataAddressError
+from modbus_connection import IllegalFunctionError
 from modbus_connection import ModbusConnectionError
 from modbus_connection import ModbusError
-from modbus_connection import ModbusExceptionError
 from modbus_connection import ModbusTcpParams
 from modbus_connection.model.sunspec import SunSpecComponent
 from modbus_connection.model.sunspec import SunSpecError
@@ -298,9 +299,12 @@ class SunSpecApiClient:
         for base_address in BASE_ADDRESSES:
             try:
                 self._models = await scan(self._unit, base_address)
-            except (SunSpecError, ModbusExceptionError) as err:
-                # Not a SunSpec map here, or the device refuses the address;
-                # both mean "try the next base address".
+            except (SunSpecError, IllegalDataAddressError, IllegalFunctionError) as err:
+                # Not a SunSpec map here, or the device does not serve the
+                # address at all; both mean "try the next base address". Any
+                # other refusal - busy, device failure, a gateway that cannot
+                # reach the unit - means "not this time", so it propagates
+                # rather than being remembered as "no SunSpec device here".
                 errors.append(f"{base_address}: {err}")
                 continue
             _LOGGER.debug(
