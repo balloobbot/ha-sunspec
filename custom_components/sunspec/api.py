@@ -4,10 +4,10 @@ from dataclasses import dataclass
 import logging
 from typing import Any
 
+from modbus_connection import ModbusConnectionError
 from modbus_connection import ModbusError
 from modbus_connection import ModbusExceptionError
 from modbus_connection import ModbusTcpParams
-from modbus_connection.model import ComponentGroup
 from modbus_connection.model.sunspec import SunSpecComponent
 from modbus_connection.model.sunspec import SunSpecError
 from modbus_connection.model.sunspec import SunSpecMapShiftError
@@ -45,7 +45,33 @@ __all__ = [
     "SunSpecApiClient",
     "SunSpecMapShiftError",
     "SunSpecModelWrapper",
+    "UpdateReport",
 ]
+
+
+@dataclass(frozen=True)
+class UpdateReport:
+    """What one poll refreshed, by ``model_id:model_index``.
+
+    A model instance that failed kept its previous values and is named here with
+    the error that failed it. A model whose components could not be built at all
+    is named by its bare id instead, since it has no instances yet. A dead link
+    is never in here - the read raises ``ModbusConnectionError`` instead of
+    reporting partial silence.
+    """
+
+    updated: set[str]
+    failed: dict[str, ModbusError]
+
+    @property
+    def complete(self) -> bool:
+        """Whether every model asked for refreshed."""
+        return not self.failed
+
+
+def poll_key(model_id: int, model_index: int) -> str:
+    """The report key for one model instance."""
+    return f"{model_id}:{model_index}"
 
 
 @dataclass(frozen=True)
@@ -171,7 +197,6 @@ class SunSpecApiClient:
         self._models: SunSpecModels | None = None
         self._wrappers: dict[int, SunSpecModelWrapper] = {}
         self._components: dict[int, list[SunSpecComponent]] = {}
-        self._groups: dict[frozenset[int], ComponentGroup] = {}
 
     async def async_get_models(self, config=None) -> list:
         """Return the sorted IDs of every model the device advertises."""
@@ -192,26 +217,61 @@ class SunSpecApiClient:
         return await self.async_get_data(1)
 
     async def async_get_data(self, model_id) -> SunSpecModelWrapper:
-        """Read one model."""
-        _LOGGER.debug("Get data for model %s", model_id)
-        return (await self.async_read({model_id}))[model_id]
+        """Read one model, raising whatever kept it from refreshing.
 
-    async def async_read(self, model_ids: set) -> dict:
-        """Read every requested model the device has, in one pooled update."""
-        present = {
-            model_id for model_id in model_ids if await self._async_build(model_id)
-        }
-        if not present:
-            return {}
-        key = frozenset(present)
-        group = self._groups.get(key)
-        if group is None:
-            group = self._groups[key] = ComponentGroup(
-                self._unit,
-                [component for m in present for component in self._components[m]],
-            )
-        await group.async_update()
-        return {model_id: self._wrappers[model_id] for model_id in present}
+        Asking for a single model leaves nothing to contain: an empty wrapper is
+        no more use to the caller than the error is.
+        """
+        _LOGGER.debug("Get data for model %s", model_id)
+        models, report = await self.async_read({model_id})
+        for error in report.failed.values():
+            raise error
+        return models[model_id]
+
+    async def async_read(self, model_ids: set) -> tuple[dict, UpdateReport]:
+        """Read every requested model the device has, one component at a time.
+
+        Each model instance is read on its own, so a block the device is too slow
+        to answer costs that model its refresh and nothing else: its points keep
+        the values the last poll decoded, and the report names it with the error.
+        Listeners fire only once every instance has been tried. A failure of the
+        link itself raises ``ModbusConnectionError`` rather than reporting.
+        """
+        updated: set[str] = set()
+        failed: dict[str, ModbusError] = {}
+        present = []
+        for model_id in sorted(model_ids):
+            try:
+                built = await self._async_build(model_id)
+            except ModbusConnectionError:
+                raise
+            except ModbusError as err:
+                # Building reads a nested group's count points. Contain that too,
+                # or a model whose counts never answer blanks the whole device on
+                # every poll instead of just itself.
+                _LOGGER.debug("Could not build model %s: %s", model_id, err)
+                failed[str(model_id)] = err
+                continue
+            if built:
+                present.append(model_id)
+
+        fresh: list[SunSpecComponent] = []
+        for model_id in present:
+            for model_index, component in enumerate(self._components[model_id]):
+                try:
+                    await component.async_update(notify=False)
+                except ModbusConnectionError:
+                    raise
+                except ModbusError as err:
+                    failed[poll_key(model_id, model_index)] = err
+                else:
+                    updated.add(poll_key(model_id, model_index))
+                    fresh.append(component)
+        for component in fresh:
+            component.notify()
+
+        models = {model_id: self._wrappers[model_id] for model_id in present}
+        return models, UpdateReport(updated, failed)
 
     async def async_disconnect(self) -> None:
         """Drop the link; the next read establishes a new one.
@@ -286,11 +346,10 @@ class SunSpecApiClient:
             # A SunSpec chain is one contiguous run of registers - every model's
             # header says where the next one starts - and the scan walked it end
             # to end, so the device answers every address in it. Saying so lets a
-            # pooled block read cross the boundary between two models instead of
-            # stopping at the last point of one; without it the planner keeps
-            # each model's reads to the addresses that model claims by itself.
-            # Readable ranges are declared in the component's own coordinates,
-            # which the model's address shifts.
+            # block read bridge whatever a model leaves unread between its points
+            # instead of splitting there; without it the planner may only join
+            # addresses this model claims by itself. Readable ranges are declared
+            # in the component's own coordinates, which the model's address shifts.
             component.register_ranges = (
                 (chain_low - model.address, chain_high - model.address),
             )

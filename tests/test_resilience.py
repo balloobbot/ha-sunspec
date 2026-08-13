@@ -1,0 +1,201 @@
+"""One failing block must not take the rest of the poll with it.
+
+Models used to be read through a single pooled plan, so the first block a device
+was too slow to answer discarded every model's data and left the whole device
+unavailable. Each model instance is now read on its own.
+"""
+
+from homeassistant.const import STATE_UNAVAILABLE
+from homeassistant.core import HomeAssistant
+from modbus_connection import ModbusConnectionError
+from modbus_connection import ModbusTimeoutError
+import pytest
+
+from custom_components.sunspec.api import SunSpecApiClient
+from custom_components.sunspec.const import DOMAIN
+
+from . import TEST_INVERTER_SENSOR_DC_ENTITY_ID
+from . import TEST_INVERTER_SENSOR_POWER_ENTITY_ID
+from . import setup_mock_sunspec_config_entry
+from .conftest import TEST_DEVICE
+from .conftest import patch_sunspec_device
+from .conftest import sunspec_holding_registers
+
+# Model 103 occupies 40090..40141 and model 160 occupies 40830..40879, so a read
+# failure inside one of them cannot touch the other.
+IN_MODEL_103 = 40100
+# Model 705 sizes its curve group from the count point here, which the build
+# reads before the model can be polled at all.
+MODEL_705_COUNT = 40595
+# Model 103's Evt1 bitfield, 40 registers past its header.
+MODEL_103_EVT1 = 40130
+
+
+@pytest.fixture
+def one_bit_event_device():
+    """The test device, with model 103's event bitfield down to a single bit.
+
+    Two bits make the sensor platform hand Home Assistant a comma-joined state
+    its ENUM options do not list, which raises out of any coordinator refresh.
+    That is a pre-existing fault of the bitfield rendering, not of the poll.
+    """
+    registers = sunspec_holding_registers(TEST_DEVICE)
+    registers[MODEL_103_EVT1] = 0
+    registers[MODEL_103_EVT1 + 1] = 1
+    with patch_sunspec_device(registers=registers):
+        yield
+
+
+async def test_a_failed_model_leaves_the_rest_fresh(hass, sunspec_client_mock):
+    """A model whose block fails keeps its values; the others still refresh."""
+    api = SunSpecApiClient(host="test", port=123, unit_id=1)
+    models, _ = await api.async_read({103, 160})
+    before = models[103].getValue("W")
+
+    unit = api._unit
+    unit.holding[40093] = 4321  # the device's AC current changes
+    unit.holding[40849] = 77  # so does the first module's DC current
+    unit.fail_read(IN_MODEL_103, ModbusTimeoutError("slow inverter block"))
+    models, report = await api.async_read({103, 160})
+
+    assert not report.complete
+    assert set(report.failed) == {"103:0"}
+    assert isinstance(report.failed["103:0"], ModbusTimeoutError)
+    assert report.updated == {"160:0"}
+    assert models[103].getValue("W") == before
+    assert models[160].getValue("module:0:DCA") == 77
+    await api.async_close()
+
+
+async def test_listeners_fire_at_the_end_and_only_for_fresh_models(
+    hass, sunspec_client_mock
+):
+    """Nothing is notified until every model has been tried."""
+    api = SunSpecApiClient(host="test", port=123, unit_id=1)
+    await api.async_read({103, 160})
+
+    unit = api._unit
+    seen = []
+    api._components[160][0].add_update_listener(
+        lambda: seen.append(len(unit.read_events))
+    )
+    api._components[103][0].add_update_listener(lambda: seen.append(-1))
+
+    unit.fail_read(IN_MODEL_103, ModbusTimeoutError("slow inverter block"))
+    unit.read_events.clear()
+    await api.async_read({103, 160})
+
+    # One notification, fired after the last read of the poll; none for 103.
+    assert seen == [len(unit.read_events)]
+    await api.async_close()
+
+
+async def test_a_dead_link_raises_instead_of_reporting(hass, sunspec_client_mock):
+    """Partial silence is not a partial update - the link itself is gone."""
+    api = SunSpecApiClient(host="test", port=123, unit_id=1)
+    await api.async_read({103, 160})
+
+    api._unit.fail_requests(ModbusConnectionError("link down"))
+    with pytest.raises(ModbusConnectionError):
+        await api.async_read({103, 160})
+    await api.async_close()
+
+
+async def test_a_healthy_poll_is_complete(hass, sunspec_client_mock):
+    """Every model asked for is named in the report when nothing fails."""
+    api = SunSpecApiClient(host="test", port=123, unit_id=1)
+    models, report = await api.async_read({1, 103, 160})
+
+    assert report.complete
+    assert report.failed == {}
+    assert report.updated == {"1:0", "103:0", "160:0"}
+    assert set(models) == {1, 103, 160}
+    await api.async_close()
+
+
+async def test_a_model_that_cannot_be_built_is_contained(hass, sunspec_client_mock):
+    """A count point that will not answer costs its own model only.
+
+    Sizing a nested group is I/O too, and it happens before the model can be
+    polled - so without containment a model whose counts never answer would
+    blank the whole device on every poll.
+    """
+    api = SunSpecApiClient(host="test", port=123, unit_id=1)
+    api._unit.fail_read(MODEL_705_COUNT, ModbusTimeoutError("no answer"))
+
+    models, report = await api.async_read({103, 705})
+    assert set(report.failed) == {"705"}
+    assert report.updated == {"103:0"}
+    assert set(models) == {103}
+
+    # The failure is not latched: the model is built and polled once it answers.
+    api._unit.fail_read(MODEL_705_COUNT, None)
+    models, report = await api.async_read({103, 705})
+    assert report.complete
+    assert report.updated == {"103:0", "705:0"}
+    assert models[705].getValue("Crv:0:VRef") == 0.01
+    await api.async_close()
+
+
+async def test_reading_a_single_model_raises_its_error(hass, sunspec_client_mock):
+    """There is nothing to contain when only one model was asked for."""
+    api = SunSpecApiClient(host="test", port=123, unit_id=1)
+    await api.async_read({103})
+
+    api._unit.fail_read(IN_MODEL_103, ModbusTimeoutError("slow inverter block"))
+    with pytest.raises(ModbusTimeoutError):
+        await api.async_get_data(103)
+    await api.async_close()
+
+
+async def test_only_the_failed_models_sensors_go_unavailable(
+    hass: HomeAssistant, one_bit_event_device
+) -> None:
+    """The device keeps reporting; the model that did not answer does not."""
+    config_entry = await setup_mock_sunspec_config_entry(hass)
+    coordinator = hass.data[DOMAIN][config_entry.entry_id]
+    assert (
+        hass.states.get(TEST_INVERTER_SENSOR_POWER_ENTITY_ID).state != STATE_UNAVAILABLE
+    )
+
+    coordinator.api._unit.fail_read(
+        IN_MODEL_103, ModbusTimeoutError("slow inverter block")
+    )
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+
+    assert coordinator.last_update_success
+    assert set(coordinator.report.failed) == {"103:0"}
+    assert (
+        hass.states.get(TEST_INVERTER_SENSOR_POWER_ENTITY_ID).state == STATE_UNAVAILABLE
+    )
+    dc = hass.states.get(TEST_INVERTER_SENSOR_DC_ENTITY_ID)
+    assert dc.state not in (STATE_UNAVAILABLE, None)
+
+    # And they come back on the poll that answers again.
+    coordinator.api._unit.fail_read(IN_MODEL_103, None)
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+    assert coordinator.report.complete
+    assert (
+        hass.states.get(TEST_INVERTER_SENSOR_POWER_ENTITY_ID).state != STATE_UNAVAILABLE
+    )
+
+
+async def test_a_dead_device_marks_every_sensor_unavailable(
+    hass: HomeAssistant, one_bit_event_device
+) -> None:
+    """Containment is per model; a device answering nothing is still a failure."""
+    config_entry = await setup_mock_sunspec_config_entry(hass)
+    coordinator = hass.data[DOMAIN][config_entry.entry_id]
+
+    coordinator.api._unit.fail_requests(ModbusConnectionError("link down"))
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+
+    assert not coordinator.last_update_success
+    for entity_id in (
+        TEST_INVERTER_SENSOR_POWER_ENTITY_ID,
+        TEST_INVERTER_SENSOR_DC_ENTITY_ID,
+    ):
+        assert hass.states.get(entity_id).state == STATE_UNAVAILABLE

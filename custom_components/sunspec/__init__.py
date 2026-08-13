@@ -17,6 +17,7 @@ from homeassistant.helpers.update_coordinator import UpdateFailed
 
 from .api import SunSpecApiClient
 from .api import SunSpecMapShiftError
+from .api import UpdateReport
 from .const import CONF_ENABLED_MODELS
 from .const import CONF_HOST
 from .const import CONF_PORT
@@ -144,6 +145,8 @@ class SunSpecDataUpdateCoordinator(DataUpdateCoordinator):
             )
         )
         self.option_model_filter = set(map(lambda m: int(m), models))
+        self.report = UpdateReport(set(), {})
+        self._logged_failures: set[str] = set()
         self.unsub = entry.add_update_listener(async_reload_entry)
         _LOGGER.debug(
             "Setup entry with models %s, scan interval %s. IP: %s Port: %s ID: %s",
@@ -165,7 +168,7 @@ class SunSpecDataUpdateCoordinator(DataUpdateCoordinator):
         """Update data via library."""
         _LOGGER.debug("SunSpec Update data coordinator update")
         try:
-            return await self.api.async_read(self.option_model_filter)
+            data, self.report = await self.api.async_read(self.option_model_filter)
         except SunSpecMapShiftError as exception:
             # The components sit at the addresses the setup scan found. The device
             # rearranged its model chain, so setup has to run again.
@@ -175,7 +178,26 @@ class SunSpecDataUpdateCoordinator(DataUpdateCoordinator):
         except Exception as exception:
             _LOGGER.warning(exception)
             raise UpdateFailed() from exception
+        else:
+            self._log_failures()
+            return data
         finally:
             # This integration polls infrequently and some inverters accept only
             # one Modbus connection, so the link is not held between updates.
             await self.api.async_disconnect()
+
+    def _log_failures(self) -> None:
+        """Report a change in which models are not answering, once per change."""
+        failed = set(self.report.failed)
+        if failed == self._logged_failures:
+            return
+        self._logged_failures = failed
+        if failed:
+            _LOGGER.warning(
+                "Keeping the last values for models that did not answer: %s",
+                ", ".join(
+                    f"{name} ({error})" for name, error in self.report.failed.items()
+                ),
+            )
+        else:
+            _LOGGER.info("Every enabled model is answering again")

@@ -24,6 +24,7 @@ from homeassistant.const import UnitOfTemperature
 from homeassistant.const import UnitOfTime
 
 from . import get_sunspec_unique_id
+from .api import poll_key
 from .const import CONF_PREFIX
 from .const import DOMAIN
 from .entity import SunSpecEntity
@@ -108,6 +109,7 @@ class SunSpecSensor(SunSpecEntity, SensorEntity):
         )
         self.model_id = data["model_id"]
         self.model_index = data["model_index"]
+        self.poll_key = poll_key(self.model_id, self.model_index)
         self.model_wrapper = data["model"]
         self.key = data["key"]
         self._meta = self.model_wrapper.getMeta(self.key)
@@ -189,6 +191,16 @@ class SunSpecSensor(SunSpecEntity, SensorEntity):
     @property
     def assumed_state(self):
         return self._assumed_state
+
+    @property
+    def available(self):
+        """Whether the last poll refreshed the model instance behind this point.
+
+        The values are still there when it did not, but they are as old as the
+        failure, so only this model's sensors go unavailable - the rest of the
+        device keeps reporting.
+        """
+        return super().available and self.poll_key not in self.coordinator.report.failed
 
     @property
     def native_value(self):
