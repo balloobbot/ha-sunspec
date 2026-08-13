@@ -172,32 +172,27 @@ class SunSpecDataUpdateCoordinator(DataUpdateCoordinator):
         except SunSpecMapShiftError as exception:
             # The components sit at the addresses the setup scan found. The device
             # rearranged its model chain, so setup has to run again.
-            _LOGGER.warning("SunSpec register map changed, reloading: %s", exception)
             self.hass.config_entries.async_schedule_reload(self.entry.entry_id)
-            raise UpdateFailed() from exception
+            raise UpdateFailed(str(exception)) from exception
         except Exception as exception:
-            _LOGGER.warning(exception)
-            raise UpdateFailed() from exception
-        else:
-            self._log_failures()
-            return data
+            raise UpdateFailed(str(exception)) from exception
         finally:
             # This integration polls infrequently and some inverters accept only
             # one Modbus connection, so the link is not held between updates.
             await self.api.async_disconnect()
 
-    def _log_failures(self) -> None:
-        """Report a change in which models are not answering, once per change."""
-        failed = set(self.report.failed)
-        if failed == self._logged_failures:
-            return
-        self._logged_failures = failed
-        if failed:
-            _LOGGER.warning(
-                "Keeping the last values for models that did not answer: %s",
-                ", ".join(
-                    f"{name} ({error})" for name, error in self.report.failed.items()
-                ),
+        if self.report.failed and not self.report.updated:
+            # Home Assistant logs str(err) and keeps the traceback for debug, so
+            # the failure has to name itself rather than say "nothing answered".
+            errors = list(self.report.failed.values())
+            raise UpdateFailed(f"no model answered: {errors[0]}") from ExceptionGroup(
+                "every model failed", errors
             )
-        else:
-            _LOGGER.info("Every enabled model is answering again")
+        self._log_failures()
+        return data
+
+    def _log_failures(self) -> None:
+        """Warn about each model that has newly stopped answering, once."""
+        for name in sorted(self.report.failed.keys() - self._logged_failures):
+            _LOGGER.warning("Failed to fetch %s: %s", name, self.report.failed[name])
+        self._logged_failures = set(self.report.failed)

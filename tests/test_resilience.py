@@ -29,6 +29,7 @@ from .conftest import sunspec_holding_registers
 # Model 103 occupies 40090..40141 and model 160 occupies 40830..40879, so a read
 # failure inside one of them cannot touch the other.
 IN_MODEL_103 = 40100
+IN_MODEL_160 = 40840
 # Model 705 sizes its curve group from the count point here, which the build
 # reads before the model can be polled at all.
 MODEL_705_COUNT = 40595
@@ -196,6 +197,47 @@ async def test_an_accumulator_outlives_its_models_failure(
     )
     energy = hass.states.get(TEST_INVERTER_SENSOR_ENERGY_ENTITY_ID)
     assert energy.state == energy_before.state != STATE_UNAVAILABLE
+
+
+async def test_a_device_answering_nothing_fails_with_a_reason(
+    hass: HomeAssistant, sunspec_client_mock
+) -> None:
+    """The failure names an error, since that is all the user gets to see.
+
+    Home Assistant logs the message at error level and keeps the traceback for
+    debug, so "no model answered" on its own would say nothing about why.
+    """
+    config_entry = await setup_mock_sunspec_config_entry(hass)
+    coordinator = hass.data[DOMAIN][config_entry.entry_id]
+
+    for address in (IN_MODEL_103, IN_MODEL_160):
+        coordinator.api._unit.fail_read(address, ServerDeviceBusyError())
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+
+    assert not coordinator.last_update_success
+    error = coordinator.last_exception
+    assert str(coordinator.report.failed["103:0"]) in str(error)
+    # Every failure is kept, not just the one that got named.
+    assert len(error.__cause__.exceptions) == 2
+
+
+async def test_a_newly_failed_model_is_logged_once(
+    hass: HomeAssistant, sunspec_client_mock, caplog
+) -> None:
+    """A model that keeps failing has already been reported."""
+    config_entry = await setup_mock_sunspec_config_entry(hass)
+    coordinator = hass.data[DOMAIN][config_entry.entry_id]
+
+    coordinator.api._unit.fail_read(
+        IN_MODEL_103, ModbusTimeoutError("slow inverter block")
+    )
+    caplog.clear()
+    await coordinator.async_refresh()
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+
+    assert caplog.text.count("Failed to fetch 103:0") == 1
 
 
 async def test_a_busy_device_is_not_read_as_a_missing_map(hass):
