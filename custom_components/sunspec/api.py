@@ -35,6 +35,10 @@ TIMEOUT = 120
 MESSAGE_SPACING = 0.1
 # Where a device may place the "SunS" marker, in the order SunSpec suggests.
 BASE_ADDRESSES = (40000, 0, 50000)
+# The registers that bracket the model chain: "SunS" ahead of the first model,
+# and the reserved model ID that ends it.
+SUNSPEC_MARKER = (0x5375, 0x6E53)
+END_MODEL = (0xFFFF, 0)
 
 _LOGGER: logging.Logger = logging.getLogger(__package__)
 
@@ -172,6 +176,26 @@ def _chain_range(models: SunSpecModels) -> tuple[int, int]:
     return chain[0].address, last.address + last.span - 1
 
 
+def _chain_registers(models: SunSpecModels, base_address: int) -> dict[int, int]:
+    """What a scan reads to walk the chain: the markers and every model header.
+
+    None of it belongs to a component. The markers belong to no model at all,
+    and a header is only covered by a read if that model was built - which only
+    the models this integration renders are, so the walk would otherwise lose
+    its place at the first one that was skipped.
+
+    Synthesized rather than read: the scan proved every value here, and a
+    download has to survive a device that has gone to sleep.
+    """
+    registers = dict(enumerate(SUNSPEC_MARKER, base_address))
+    for model in models.chain:
+        registers[model.address] = model.model_id
+        registers[model.address + 1] = model.length
+    chain = models.chain
+    end = chain[-1].address + chain[-1].span if chain else base_address + 2
+    return registers | dict(enumerate(END_MODEL, end))
+
+
 def _read_point(point: PointLayout, component) -> SunSpecPoint:
     """Read a point's decoded value off the component holding it."""
     scaled = getattr(component, point.attr, None)
@@ -196,6 +220,7 @@ class SunSpecApiClient:
         )
         self._unit = self._connection.for_unit(unit_id)
         self._models: SunSpecModels | None = None
+        self._markers: dict[int, int] = {}
         self._wrappers: dict[int, SunSpecModelWrapper] = {}
         self._components: dict[int, list[SunSpecComponent]] = {}
 
@@ -283,6 +308,8 @@ class SunSpecApiClient:
         The fields refresh but nothing is notified: a download happens off the
         poll cycle, and firing the listeners would write a state for every entity
         at a moment the coordinator's report knows nothing about.
+
+        The chain markers go in alongside, so the snapshot scans again.
         """
         raw: dict[str, dict[int, int | bool]] = {}
         for components in self._components.values():
@@ -290,6 +317,8 @@ class SunSpecApiClient:
                 read = await component.async_read_raw(notify=False)
                 for space, values in read.items():
                     raw.setdefault(space, {}).update(values)
+        if self._markers:
+            raw.setdefault("holding", {}).update(self._markers)
         return raw
 
     async def async_disconnect(self) -> None:
@@ -325,6 +354,7 @@ class SunSpecApiClient:
                 # rather than being remembered as "no SunSpec device here".
                 errors.append(f"{base_address}: {err}")
                 continue
+            self._markers = _chain_registers(self._models, base_address)
             _LOGGER.debug(
                 "Found SunSpec models at base address %s: %s",
                 base_address,

@@ -3,11 +3,14 @@
 from homeassistant.core import HomeAssistant
 from modbus_connection import ModbusConnectionError
 from modbus_connection import ModbusTimeoutError
+from modbus_connection.mock import MockModbusConnection
+from modbus_connection.model.sunspec import scan
 
 from custom_components.sunspec.const import DOMAIN
 from custom_components.sunspec.diagnostics import async_get_config_entry_diagnostics
 
 from . import setup_mock_sunspec_config_entry
+from .conftest import BASE_ADDRESS
 from .test_resilience import IN_MODEL_103
 
 # The common model sits at the head of the chain, model 103 well past it.
@@ -54,6 +57,25 @@ async def test_a_download_does_not_look_like_a_poll(
 
     assert diagnostics["registers"]["holding"]
     assert notified == []
+
+
+async def test_a_downloaded_snapshot_scans_again(
+    hass: HomeAssistant, sunspec_client_mock
+) -> None:
+    """A dump only backs a hardware-free test if it replays into the mock.
+
+    The chain markers belong to no component, so no component read covers them -
+    and without them a replayed scan cannot find where the chain starts or ends.
+    """
+    config_entry = await setup_mock_sunspec_config_entry(hass)
+    coordinator = hass.data[DOMAIN][config_entry.entry_id]
+
+    diagnostics = await async_get_config_entry_diagnostics(hass, config_entry)
+
+    unit = MockModbusConnection().for_unit(1)
+    unit.load_raw(diagnostics["registers"])
+
+    assert sorted(await scan(unit, BASE_ADDRESS)) == sorted(coordinator.api._models)
 
 
 async def test_diagnostics_name_the_models_that_did_not_answer(
