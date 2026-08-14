@@ -1,6 +1,5 @@
 """Sensor platform for SunSpec."""
 
-from functools import cached_property
 import logging
 
 from homeassistant.components.sensor import RestoreSensor
@@ -123,7 +122,6 @@ class SunSpecSensor(SunSpecEntity, SensorEntity):
         self.use_icon = ha_meta[1]
         self.use_device_class = ha_meta[2]
         self._options = []
-        self._assumed_state = False
 
         self._uniqe_id = get_sunspec_unique_id(
             config_entry.entry_id, self.key, self.model_id, self.model_index
@@ -192,18 +190,6 @@ class SunSpecSensor(SunSpecEntity, SensorEntity):
         return self._uniqe_id
 
     @property
-    def assumed_state(self):
-        return self._assumed_state
-
-    @cached_property
-    def is_total(self):
-        """Whether this point accumulates rather than measures."""
-        return self.state_class in (
-            SensorStateClass.TOTAL,
-            SensorStateClass.TOTAL_INCREASING,
-        )
-
-    @property
     def available(self):
         """Whether the last poll refreshed the model instance behind this point.
 
@@ -211,32 +197,13 @@ class SunSpecSensor(SunSpecEntity, SensorEntity):
         failure, so only this model's sensors go unavailable - the rest of the
         device keeps reporting, and a device that answers nothing at all takes
         every one of them.
-
-        Accumulators are exempt from both. A counter that goes away tears a hole
-        in long term statistics and the energy dashboard, and a SunSpec inverter
-        stops answering every night. The trade is that a total never reads
-        unavailable, even for a device that is gone for good: whether the device
-        is reachable is a question for a connectivity entity, not for a counter.
         """
-        return self.is_total or (
-            super().available and self.poll_key not in self.coordinator.report.failed
-        )
+        return super().available and self.poll_key not in self.coordinator.report.failed
 
-    @callback
-    def _handle_coordinator_update(self) -> None:
-        self._process_data()
-        super()._handle_coordinator_update()
-
-    async def async_added_to_hass(self) -> None:
-        """Call when entity about to be added to hass."""
-        await super().async_added_to_hass()
-        self._process_data()
-
-    def _process_data(self) -> None:
-        """Store what the last poll decoded; a total keeps what it had."""
-        value = self._read_value()
-        if value is not None or not self.is_total:
-            self._attr_native_value = value
+    @property
+    def native_value(self):
+        """Read straight through to what the last poll decoded."""
+        return self._read_value()
 
     def _read_value(self):
         """Return what the last poll decoded for this point."""
@@ -319,6 +286,47 @@ class SunSpecSensor(SunSpecEntity, SensorEntity):
 
 
 class SunSpecEnergySensor(SunSpecSensor, RestoreSensor):
+    """A counter, which holds its last reading rather than reading through."""
+
+    _assumed_state = False
+
+    @property
+    def available(self):
+        """Always.
+
+        A counter that goes away tears a hole in long term statistics and the
+        energy dashboard, and a SunSpec inverter stops answering every night.
+        The trade is that a total never reads unavailable, even for a device
+        that is gone for good: whether the device is reachable is a question for
+        a connectivity entity, not for a counter.
+
+        This has to be a property. ``CoordinatorEntity.available`` is one too, so
+        a class attribute would never be consulted and the total would go
+        unavailable exactly when the device answered nothing.
+        """
+        return True
+
+    @property
+    def assumed_state(self):
+        return self._assumed_state
+
+    @property
+    def native_value(self):
+        """The last real reading, not whatever the failed poll left behind."""
+        return self._attr_native_value
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        self._process_data()
+        super()._handle_coordinator_update()
+
+    async def async_added_to_hass(self) -> None:
+        """Seed the counter from the state it had before the restart."""
+        await super().async_added_to_hass()
+        if (last_data := await self.async_get_last_sensor_data()) is not None:
+            self._attr_native_value = last_data.native_value
+        self._process_data()
+
     def _process_data(self) -> None:
         """Hold the last reading unless the device answered with a real one.
 
@@ -329,14 +337,3 @@ class SunSpecEnergySensor(SunSpecSensor, RestoreSensor):
         self._assumed_state = not value
         if value:
             self._attr_native_value = value
-
-    async def async_added_to_hass(self) -> None:
-        """Seed the counter from the state it had before the restart.
-
-        Home Assistant writes the state right after this, so the restored value
-        only has to be in place before ``_process_data()`` runs - which the base
-        class does at the end of its own ``async_added_to_hass()``.
-        """
-        if (last_data := await self.async_get_last_sensor_data()) is not None:
-            self._attr_native_value = last_data.native_value
-        await super().async_added_to_hass()
