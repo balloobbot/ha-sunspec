@@ -29,8 +29,8 @@ A poll used to pool every model into one `ComponentGroup`. It no longer does:
 `ReadPlan.execute` stores nothing until every block in the plan has been read,
 so one block a device was slow to answer discarded the entire poll and left all
 of the integration's sensors unavailable. Models are read one at a time now, and
-a `ModbusError` costs only its own model — see "When a device answers only part
-of a poll" in the README. The reads below are counted per model accordingly.
+a `ModbusError` costs only its own model, once the device has answered at all —
+see "When a device answers only part of a poll" in the README. The reads below are counted per model accordingly.
 
 ---
 

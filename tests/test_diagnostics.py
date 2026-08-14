@@ -12,6 +12,7 @@ from custom_components.sunspec.diagnostics import async_get_config_entry_diagnos
 from . import setup_mock_sunspec_config_entry
 from .conftest import BASE_ADDRESS
 from .test_resilience import IN_MODEL_103
+from .test_resilience import IN_MODEL_160
 
 # The common model sits at the head of the chain, model 103 well past it.
 IN_MODEL_1 = 40002
@@ -85,13 +86,14 @@ async def test_diagnostics_name_the_models_that_did_not_answer(
     config_entry = await setup_mock_sunspec_config_entry(hass)
     coordinator = hass.data[DOMAIN][config_entry.entry_id]
 
-    coordinator.api._unit.fail_read(IN_MODEL_103, ModbusTimeoutError("slow block"))
+    # On the second model polled: the first has answered, so the poll goes on.
+    coordinator.api._unit.fail_read(IN_MODEL_160, ModbusTimeoutError("slow block"))
     await coordinator.async_refresh()
     await hass.async_block_till_done()
 
     diagnostics = await async_get_config_entry_diagnostics(hass, config_entry)
-    assert diagnostics["updated"] == ["160:0"]
-    assert "slow block" in diagnostics["failed"]["103:0"]
+    assert diagnostics["updated"] == ["103:0"]
+    assert "slow block" in diagnostics["failed"]["160:0"]
 
 
 async def test_diagnostics_of_a_device_that_will_not_answer(

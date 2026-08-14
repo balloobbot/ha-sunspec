@@ -40,23 +40,47 @@ MODEL_705_COUNT = 40595
 
 
 async def test_a_failed_model_leaves_the_rest_fresh(hass, sunspec_client_mock):
-    """A model whose block fails keeps its values; the others still refresh."""
+    """A model whose block fails keeps its values; the others still refresh.
+
+    Model 103 is polled first and answers, so 160's timeout is one slow block
+    rather than a device that is not there.
+    """
     api = SunSpecApiClient(host="test", port=123, unit_id=1)
     models, _ = await api.async_read({103, 160})
-    before = models[103].getValue("W")
+    before = models[160].getValue("module:0:DCA")
 
     unit = api._unit
     unit.holding[40093] = 4321  # the device's AC current changes
     unit.holding[40849] = 77  # so does the first module's DC current
-    unit.fail_read(IN_MODEL_103, ModbusTimeoutError("slow inverter block"))
+    unit.fail_read(IN_MODEL_160, ModbusTimeoutError("slow inverter block"))
     models, report = await api.async_read({103, 160})
 
     assert not report.complete
-    assert set(report.failed) == {"103:0"}
-    assert isinstance(report.failed["103:0"], ModbusTimeoutError)
-    assert report.updated == {"160:0"}
-    assert models[103].getValue("W") == before
-    assert models[160].getValue("module:0:DCA") == 77
+    assert set(report.failed) == {"160:0"}
+    assert isinstance(report.failed["160:0"], ModbusTimeoutError)
+    assert report.updated == {"103:0"}
+    assert models[160].getValue("module:0:DCA") == before != 77
+    assert models[103].getValue("AphA") == 4321
+    await api.async_close()
+
+
+async def test_the_first_read_timing_out_gives_up_the_poll(hass, sunspec_client_mock):
+    """A poll that has heard nothing at all stops at the first timeout.
+
+    Nothing has answered, so the models after it would each pay a full timeout
+    of their own - two minutes apiece here - for the same silence.
+    """
+    api = SunSpecApiClient(host="test", port=123, unit_id=1)
+    await api.async_read({103, 160})
+
+    unit = api._unit
+    unit.fail_read(IN_MODEL_103, ModbusTimeoutError("asleep for the night"))
+    unit.read_events.clear()
+    with pytest.raises(ModbusTimeoutError):
+        await api.async_read({103, 160})
+
+    # The one read that timed out; model 160 was never reached.
+    assert len(unit.read_events) == 1
     await api.async_close()
 
 
@@ -69,16 +93,16 @@ async def test_listeners_fire_at_the_end_and_only_for_fresh_models(
 
     unit = api._unit
     seen = []
-    api._components[160][0].add_update_listener(
+    api._components[103][0].add_update_listener(
         lambda: seen.append(len(unit.read_events))
     )
-    api._components[103][0].add_update_listener(lambda: seen.append(-1))
+    api._components[160][0].add_update_listener(lambda: seen.append(-1))
 
-    unit.fail_read(IN_MODEL_103, ModbusTimeoutError("slow inverter block"))
+    unit.fail_read(IN_MODEL_160, ModbusTimeoutError("slow inverter block"))
     unit.read_events.clear()
     await api.async_read({103, 160})
 
-    # One notification, fired after the last read of the poll; none for 103.
+    # One notification, fired after the last read of the poll; none for 160.
     assert seen == [len(unit.read_events)]
     await api.async_close()
 
@@ -111,7 +135,9 @@ async def test_a_model_that_cannot_be_built_is_contained(hass, sunspec_client_mo
 
     Sizing a nested group is I/O too, and it happens before the model can be
     polled - so without containment a model whose counts never answer would
-    blank the whole device on every poll.
+    blank the whole device on every poll. Model 103 is built and read before
+    705 is built at all, so the device has answered by the time its count point
+    does not.
     """
     api = SunSpecApiClient(host="test", port=123, unit_id=1)
     api._unit.fail_read(MODEL_705_COUNT, ModbusTimeoutError("no answer"))
@@ -130,6 +156,39 @@ async def test_a_model_that_cannot_be_built_is_contained(hass, sunspec_client_mo
     await api.async_close()
 
 
+async def test_a_count_point_timing_out_first_gives_up_the_poll(
+    hass, sunspec_client_mock
+):
+    """The build reads too, so its timeout answers to the same test.
+
+    Model 705 leads this poll, and sizing its curve group is the first thing
+    asked of the device: nothing has answered, so 706 is not walked either.
+    """
+    api = SunSpecApiClient(host="test", port=123, unit_id=1)
+    api._unit.fail_read(MODEL_705_COUNT, ModbusTimeoutError("no answer"))
+
+    with pytest.raises(ModbusTimeoutError):
+        await api.async_read({705, 706})
+
+    assert 706 not in api._components
+    await api.async_close()
+
+
+async def test_a_count_point_refused_first_is_still_contained(
+    hass, sunspec_client_mock
+):
+    """A device that refuses is a device that is there, so the poll goes on."""
+    api = SunSpecApiClient(host="test", port=123, unit_id=1)
+    api._unit.fail_read(MODEL_705_COUNT, ServerDeviceBusyError())
+
+    models, report = await api.async_read({705, 706})
+
+    assert set(report.failed) == {"705"}
+    assert report.updated == {"706:0"}
+    assert set(models) == {706}
+    await api.async_close()
+
+
 async def test_reading_a_single_model_raises_its_error(hass, sunspec_client_mock):
     """There is nothing to contain when only one model was asked for."""
     api = SunSpecApiClient(host="test", port=123, unit_id=1)
@@ -144,35 +203,33 @@ async def test_reading_a_single_model_raises_its_error(hass, sunspec_client_mock
 async def test_only_the_failed_models_sensors_go_unavailable(
     hass: HomeAssistant, sunspec_client_mock
 ) -> None:
-    """The device keeps reporting; the model that did not answer does not."""
+    """The device keeps reporting; the model that did not answer does not.
+
+    Model 103 is polled first and answers, so the timeout on 160 is a block this
+    device is slow with rather than a device that has gone quiet.
+    """
     config_entry = await setup_mock_sunspec_config_entry(hass)
     coordinator = hass.data[DOMAIN][config_entry.entry_id]
-    assert (
-        hass.states.get(TEST_INVERTER_SENSOR_POWER_ENTITY_ID).state != STATE_UNAVAILABLE
-    )
+    assert hass.states.get(TEST_INVERTER_SENSOR_DC_ENTITY_ID).state != STATE_UNAVAILABLE
 
     coordinator.api._unit.fail_read(
-        IN_MODEL_103, ModbusTimeoutError("slow inverter block")
+        IN_MODEL_160, ModbusTimeoutError("slow inverter block")
     )
     await coordinator.async_refresh()
     await hass.async_block_till_done()
 
     assert coordinator.last_update_success
-    assert set(coordinator.report.failed) == {"103:0"}
-    assert (
-        hass.states.get(TEST_INVERTER_SENSOR_POWER_ENTITY_ID).state == STATE_UNAVAILABLE
-    )
-    dc = hass.states.get(TEST_INVERTER_SENSOR_DC_ENTITY_ID)
-    assert dc.state not in (STATE_UNAVAILABLE, None)
+    assert set(coordinator.report.failed) == {"160:0"}
+    assert hass.states.get(TEST_INVERTER_SENSOR_DC_ENTITY_ID).state == STATE_UNAVAILABLE
+    power = hass.states.get(TEST_INVERTER_SENSOR_POWER_ENTITY_ID)
+    assert power.state not in (STATE_UNAVAILABLE, None)
 
     # And they come back on the poll that answers again.
-    coordinator.api._unit.fail_read(IN_MODEL_103, None)
+    coordinator.api._unit.fail_read(IN_MODEL_160, None)
     await coordinator.async_refresh()
     await hass.async_block_till_done()
     assert coordinator.report.complete
-    assert (
-        hass.states.get(TEST_INVERTER_SENSOR_POWER_ENTITY_ID).state != STATE_UNAVAILABLE
-    )
+    assert hass.states.get(TEST_INVERTER_SENSOR_DC_ENTITY_ID).state != STATE_UNAVAILABLE
 
 
 async def test_an_accumulator_outlives_its_models_failure(
@@ -182,16 +239,15 @@ async def test_an_accumulator_outlives_its_models_failure(
 
     Both points sit in model 103, so the same failed poll reaches both. Dropping
     the total would tear a hole in long term statistics and the energy dashboard
-    every time the inverter went quiet.
+    every time the inverter went quiet. The device refuses the block rather than
+    timing out on it: a refusal is an answer, so the poll carries on either way.
     """
     config_entry = await setup_mock_sunspec_config_entry(hass)
     coordinator = hass.data[DOMAIN][config_entry.entry_id]
     energy_before = hass.states.get(TEST_INVERTER_SENSOR_ENERGY_ENTITY_ID)
     assert energy_before.attributes["state_class"] == SensorStateClass.TOTAL_INCREASING
 
-    coordinator.api._unit.fail_read(
-        IN_MODEL_103, ModbusTimeoutError("slow inverter block")
-    )
+    coordinator.api._unit.fail_read(IN_MODEL_103, ServerDeviceBusyError())
     await coordinator.async_refresh()
     await hass.async_block_till_done()
 
@@ -233,9 +289,7 @@ async def test_a_newly_failed_model_is_logged_once(
     config_entry = await setup_mock_sunspec_config_entry(hass)
     coordinator = hass.data[DOMAIN][config_entry.entry_id]
 
-    coordinator.api._unit.fail_read(
-        IN_MODEL_103, ModbusTimeoutError("slow inverter block")
-    )
+    coordinator.api._unit.fail_read(IN_MODEL_103, ServerDeviceBusyError())
     caplog.clear()
     await coordinator.async_refresh()
     await coordinator.async_refresh()

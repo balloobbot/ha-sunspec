@@ -9,6 +9,7 @@ from modbus_connection import IllegalFunctionError
 from modbus_connection import ModbusConnectionError
 from modbus_connection import ModbusError
 from modbus_connection import ModbusTcpParams
+from modbus_connection import ModbusTimeoutError
 from modbus_connection.model.sunspec import SunSpecComponent
 from modbus_connection.model.sunspec import SunSpecError
 from modbus_connection.model.sunspec import SunSpecMapShiftError
@@ -62,7 +63,8 @@ class UpdateReport:
     the error that failed it. A model whose components could not be built at all
     is named by its bare id instead, since it has no instances yet. A dead link
     is never in here - the read raises ``ModbusConnectionError`` instead of
-    reporting partial silence.
+    reporting partial silence, and neither is the timeout of a poll that has
+    heard nothing at all.
     """
 
     updated: set[str]
@@ -262,15 +264,32 @@ class SunSpecApiClient:
         the values the last poll decoded, and the report names it with the error.
         Listeners fire only once every instance has been tried. A failure of the
         link itself raises ``ModbusConnectionError`` rather than reporting.
+
+        Containing a timeout is only right once the device has answered. A poll
+        that has nothing refreshed and nothing failed behind it has heard nothing
+        at all - an inverter asleep behind a bridge that keeps the socket open -
+        and walking the models from there would pay a full timeout each, so the
+        first timeout raises instead. A refusal is an answer: a device that says
+        no is a device that is there.
+
+        Each model is read as soon as it is built, so the lowest model id asked
+        for is what proves the device awake, rather than whichever model happens
+        to size a nested group from a count point.
         """
         updated: set[str] = set()
         failed: dict[str, ModbusError] = {}
         present = []
+        fresh: list[SunSpecComponent] = []
         for model_id in sorted(model_ids):
             try:
                 built = await self._async_build(model_id)
             except ModbusConnectionError:
                 raise
+            except ModbusTimeoutError as err:
+                if not (updated or failed):
+                    raise
+                failed[str(model_id)] = err
+                continue
             except ModbusError as err:
                 # Building reads a nested group's count points. Contain that too,
                 # or a model whose counts never answer blanks the whole device on
@@ -278,16 +297,19 @@ class SunSpecApiClient:
                 _LOGGER.debug("Could not build model %s: %s", model_id, err)
                 failed[str(model_id)] = err
                 continue
-            if built:
-                present.append(model_id)
+            if not built:
+                continue
+            present.append(model_id)
 
-        fresh: list[SunSpecComponent] = []
-        for model_id in present:
             for model_index, component in enumerate(self._components[model_id]):
                 try:
                     await component.async_update(notify=False)
                 except ModbusConnectionError:
                     raise
+                except ModbusTimeoutError as err:
+                    if not (updated or failed):
+                        raise
+                    failed[poll_key(model_id, model_index)] = err
                 except ModbusError as err:
                     failed[poll_key(model_id, model_index)] = err
                 else:

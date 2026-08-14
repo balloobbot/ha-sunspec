@@ -73,6 +73,10 @@ once, not once per poll. Its last values are still there and come back as soon
 as the device answers again. Only a device that stops answering altogether
 marks every sensor of the integration unavailable.
 
+A poll that hears nothing at all is not walked to the end: an inverter asleep
+for the night would otherwise pay a full timeout for every model it does not
+answer, so the first read that times out with nothing behind it ends the poll.
+
 ## Diagnostics
 
 Downloading diagnostics for the device returns every register the integration
