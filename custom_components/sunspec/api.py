@@ -279,11 +279,16 @@ class SunSpecApiClient:
 
         Walks every component built so far, so the common model that only setup
         reads is in here alongside the polled ones.
+
+        The fields refresh but nothing is notified: a download happens off the
+        poll cycle, and firing the listeners would write a state for every entity
+        at a moment the coordinator's report knows nothing about.
         """
         raw: dict[str, dict[int, int | bool]] = {}
         for components in self._components.values():
             for component in components:
-                for space, values in (await component.async_read_raw()).items():
+                read = await component.async_read_raw(notify=False)
+                for space, values in read.items():
                     raw.setdefault(space, {}).update(values)
         return raw
 

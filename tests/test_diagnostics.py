@@ -33,6 +33,29 @@ async def test_diagnostics_hold_the_registers_and_the_last_poll(
     assert IN_MODEL_103 in holding
 
 
+async def test_a_download_does_not_look_like_a_poll(
+    hass: HomeAssistant, sunspec_client_mock
+) -> None:
+    """The dump reads the device, but nothing is notified.
+
+    The read is real, so without this every listener would fire off the poll
+    cycle and write a state for each entity at a moment the coordinator's report
+    knows nothing about.
+    """
+    config_entry = await setup_mock_sunspec_config_entry(hass)
+    coordinator = hass.data[DOMAIN][config_entry.entry_id]
+
+    notified = []
+    for components in coordinator.api._components.values():
+        for component in components:
+            component.add_update_listener(lambda: notified.append(1))
+
+    diagnostics = await async_get_config_entry_diagnostics(hass, config_entry)
+
+    assert diagnostics["registers"]["holding"]
+    assert notified == []
+
+
 async def test_diagnostics_name_the_models_that_did_not_answer(
     hass: HomeAssistant, sunspec_client_mock
 ) -> None:
