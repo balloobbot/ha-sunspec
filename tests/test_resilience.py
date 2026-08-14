@@ -37,6 +37,8 @@ IN_MODEL_160 = 40840
 # Model 705 sizes its curve group from the count point here, which the build
 # reads before the model can be polled at all.
 MODEL_705_COUNT = 40595
+# The low word of model 103's lifetime energy counter, which holds 100000 Wh.
+MODEL_103_ENERGY_LOW = 40115
 
 
 async def test_a_failed_model_leaves_the_rest_fresh(hass, sunspec_client_mock):
@@ -257,6 +259,33 @@ async def test_an_accumulator_outlives_its_models_failure(
     )
     energy = hass.states.get(TEST_INVERTER_SENSOR_ENERGY_ENTITY_ID)
     assert energy.state == energy_before.state != STATE_UNAVAILABLE
+
+
+async def test_a_total_ignores_a_torn_reading(
+    hass: HomeAssistant, sunspec_client_mock
+) -> None:
+    """A counter read mid-carry comes back a hair low, which is no meter reset.
+
+    Home Assistant would see the dip as one and start the statistic over. A drop
+    of more than a percent is followed: that one the device means.
+    """
+    config_entry = await setup_mock_sunspec_config_entry(hass)
+    coordinator = hass.data[DOMAIN][config_entry.entry_id]
+    assert hass.states.get(TEST_INVERTER_SENSOR_ENERGY_ENTITY_ID).state == "100000"
+
+    coordinator.api._unit.holding[MODEL_103_ENERGY_LOW] -= 1
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+
+    assert coordinator.report.complete
+    assert hass.states.get(TEST_INVERTER_SENSOR_ENERGY_ENTITY_ID).state == "100000"
+
+    # The high word goes with it: that is a counter that really did start over.
+    coordinator.api._unit.holding[MODEL_103_ENERGY_LOW - 1] = 0
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+
+    assert hass.states.get(TEST_INVERTER_SENSOR_ENERGY_ENTITY_ID).state == "34463"
 
 
 async def test_a_device_answering_nothing_fails_with_a_reason(

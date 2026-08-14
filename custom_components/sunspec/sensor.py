@@ -286,7 +286,12 @@ class SunSpecSensor(SunSpecEntity, SensorEntity):
 
 
 class SunSpecEnergySensor(SunSpecSensor, RestoreSensor):
-    """A counter, which holds its last reading rather than reading through."""
+    """A counter, which holds its last reading rather than reading through.
+
+    Every point it is built for is an energy point, and ``state_class`` makes
+    those TOTAL_INCREASING - so any reading below the last one reads as a meter
+    reset.
+    """
 
     _assumed_state = False
 
@@ -335,5 +340,9 @@ class SunSpecEnergySensor(SunSpecSensor, RestoreSensor):
         """
         value = self._read_value()
         self._assumed_state = not value
-        if value:
-            self._attr_native_value = value
+        if not value:
+            return
+        last = self._attr_native_value
+        if last is not None and last * 0.99 <= value < last:
+            return  # ignore firmware issue causing minor decrease
+        self._attr_native_value = value
