@@ -2,7 +2,7 @@
 
 This integration used to talk to devices through **pysunspec2**'s synchronous
 Modbus client, driven from Home Assistant's executor. It now talks
-**modbus-connection 4.6.0** (tmodbus backend) and keeps pysunspec2 only for the
+**modbus-connection 4.7.0** (tmodbus backend) and keeps pysunspec2 only for the
 SunSpec model definitions it ships — the JSON catalogue, never the transport.
 
 What changed, in one paragraph: `custom_components/sunspec/model.py` compiles a
