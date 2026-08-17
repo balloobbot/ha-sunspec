@@ -7,6 +7,6 @@
   "documentation": "https://github.com/cjne/ha-sunspec",
   "iot_class": "local_polling",
   "issue_tracker": "https://github.com/cjne/ha-sunspec/issues",
-  "requirements": ["modbus-connection[tmodbus]>=4.7.0", "pysunspec2==1.1.5"],
+  "requirements": ["modbus-connection[tmodbus]>=4.8.1", "pysunspec2==1.1.5"],
   "version": "0.0.29"
 }
